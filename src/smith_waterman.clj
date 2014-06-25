@@ -122,6 +122,6 @@
                           last
                           second))
           start-locs (map first (filter #(= start (val %)) H))] ;;starts traceback from this highest value
-      (map #(trace-back (first start) % H) start-locs))))
+      (mapv #(trace-back (first start) % H) start-locs))))
 
 (def test-case ([12 "a-cacacta" "agcacac-a"]))

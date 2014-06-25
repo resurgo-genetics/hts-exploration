@@ -90,15 +90,6 @@
 (defn partition-into [n coll]
   (partition-all (/ (count coll) n) coll))
 
-(defn rfrequencies [rcoll]
-  (r/fold (fn ([] {})
-            ([l r] (merge-with + l r)))
-          (fn ([] {})
-            ([M k]
-               (let [cur-val (get M k 0)]
-                 (assoc M k (inc cur-val)))))
-          rcoll))
-
 (defn hamming-dist [s t]
   (->> (map #(if (= %1 %2) 0 1) s t)
        (reduce +)))
@@ -264,9 +255,15 @@
 (defn str-replace-at [n replacement s]
   (str (str/take n s) replacement (subs s (inc n))))
 
+(defn str-re-pos [re s]
+  (loop [m (re-matcher re s)
+         res (sorted-map)]
+    (if (.find m)
+      (recur m (assoc res (.start m) (.group m)))
+      res)))
+
 (defn str-regex-index [re s]
-  (let [x (re-find re s)
-        start (.indexOf s x)]
+  (let [[start x] (first (str-re-pos re s))]
     [start (+ start (count x))]))
 
 (defn starting-gaps [s]
@@ -347,14 +344,16 @@
   [counts]
   (let [[subs ins ins-lens dels del-lens] (transpose counts)
         ins-lens (probs 1 (flatten ins-lens))
-        del-lens (probs 1 (flatten del-lens))]
+        del-lens (probs 1 (flatten del-lens))
+        overall (->> (transpose [subs ins dels]) (map #(apply + %)) mean)
+        totals (map #(apply + %) [subs ins dels])
+        ]
     [(mapv mean [subs ins dels])
      [ins-lens del-lens]
-     (->> (transpose [subs ins dels]) (map #(apply + %)) mean)
-     (let [totals (map #(apply + %) [subs ins dels])]
-       (->> (map #(double (/ % (apply + totals))) totals)
-            (interleave [:s :i :d])
-            (apply hash-map)))]))
+     overall
+     (->> (map #(double (/ % (apply + totals))) totals)
+          (interleave [:sub :ins :del])
+          (apply hash-map))]))
 
 (defn mutation-matrix [aligned-seqs]
   (let [mutations (fn [s1 s2]
@@ -393,15 +392,15 @@
 (defmulti ^{:doc "Makes mutations of a type to the a sequence"
             :arglists '([s loc mutation-rates mutant-type])}
 
-  add-mutation (fn [s loc mutatio-rates mutant-type] mutant-type))
+  add-mutation (fn [s loc mutation-rates mutant-type] mutant-type))
 
-(defmethod add-mutation :sub [s loc mrates mutant-type]
-  (let [{tmatrix :tmatrix} mrates
+(defmethod add-mutation :sub [s loc Mrates mutant-type]
+  (let [{tmatrix :tmatrix} Mrates
         replacement (->> (str/get s loc) tmatrix markov-step)]
     (str-replace-at loc replacement s)))
 
-(defmethod add-mutation :ins [s loc mrates mutant-type]
-  (let [{:keys [lrates tmatrix]} mrates
+(defmethod add-mutation :ins [s loc Mrates mutant-type]
+  (let [{:keys [lrates tmatrix]} Mrates
         ins-len (-> lrates first markov-step)]
     (as-> ins-len n
           (repeatedly n #(markov-step (tmatrix \-)))
@@ -409,8 +408,8 @@
           (str/lower-case n)
           (str-insert-at loc n s))))
 
-(defmethod add-mutation :del [s loc mrates mutant-type]
-  (-> (mrates :lrates) second markov-step ;del length
+(defmethod add-mutation :del [s loc Mrates mutant-type]
+  (-> (Mrates :lrates) second markov-step ;del length
       (str-remove-at loc s)))
 
 (defn simulate [start-seq mutation-rates]
@@ -424,3 +423,26 @@
           (reduce add-del st (rand-mutations st drate))
           (reduce add-subs st (rand-mutations st srate))
           (reduce add-ins st (rand-mutations st irate)))))
+
+(defn simulate2 [start-seq mutation-rates]
+  (let [mrate (mutation-rates :overall)
+        totals (mutation-rates :totals)
+        mutate (fn [[s last-pos] loc type] 
+                 (let [loc (if (>= loc (count s))
+                             (dec (count s)) loc)
+                       ;(prn :s s :loc loc :type type)
+                       newstr (add-mutation s loc mutation-rates type)]
+                                        
+                   [newstr loc]))
+        locs (->> (rand-mutations start-seq mrate)
+                  (map (fn [loc] [loc (markov-step totals)]))
+                  #_(group-by second))
+        add-mutation (fn [st type] (apply mutate st type))]
+    (first (reduce #(apply mutate %1 %2) [start-seq -1] locs))))
+
+(defn kmer-freqn [n inseqs]
+  (->> (map #(freqn n %) inseqs)
+       (apply merge-with +)
+       (reduce-kv (fn [M k v]
+                    (assoc M k (double (/ v (count inseqs)))))
+                  {})))

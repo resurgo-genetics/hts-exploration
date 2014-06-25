@@ -3,7 +3,7 @@
             [clojure.contrib.io :as io]
             [clojure.contrib.string :as str]
             [clojure.core.reducers :as r]
-            
+            [clojure.math.numeric-tower :as math]
             [clojure.pprint :as pp]
             [iota]
             [foldable-seq.core :as fseq]
@@ -17,6 +17,9 @@
         edu.bc.utils
         hts-exploration.globals
         hts-exploration.utils))
+
+(set! *print-length* 10)
+*print-length*
 
 (def data-r1 (iota/vec S15-r1-qual-filter-csv))
 
@@ -627,42 +630,104 @@ cmalign --noprob -o s15-round11-cdhit-cluster-17-cmsearch-2.sto test.cm s15-roun
 
 (def foo 
   (future 
-    (time (let [st prime3-const
-                stmt "SELECT sr.sequence, sr.usable_start, sr.usable_stop 
+    (time 
+     (let [st prime3-const
+           stmt "SELECT sr.sequence, sr.usable_start, sr.usable_stop 
                                               FROM selex_reads as sr 
                                              WHERE sr.usable=1 
                                                AND sr.strand=1;"
-                aligned-seqs (-> stmt get-db-seq align-to-const)
-                _ (prn :count (count aligned-seqs))
-                [mrates lrates overall] (->> aligned-seqs count-mutations get-mutation-rates )
-                mrates (mapv #(/ % (count st)) mrates)
-                t-matrix (mutation-matrix aligned-seqs)]
-            {:overall overall
-             :mrates mrates
-             :lrates lrates
-             :tmatrix t-matrix}))))
+           aligned-seqs (-> stmt get-db-seq align-to-const)
+           _ (prn :count (count aligned-seqs))
+           [mrates lrates overall totals] (->> aligned-seqs count-mutations get-mutation-rates )
+           mrates (mapv #(/ % (count st)) mrates)
+           overall (/ overall (count st))
+           t-matrix (mutation-matrix aligned-seqs)]
+       {:overall overall
+        :totals totals
+        :mrates mrates
+        :lrates lrates
+        :tmatrix t-matrix}))))
 
 (def mutation-rates-primer-region
-  {:mrates [1.984575348257437E-4 8.07315775278278E-5 8.127829249979953E-5] ;sub,ins,del
-   :lrates [{3 7.524454477050414E-4, 2 0.012791572610985704, 1 0.9864559819413092};ins lengths
-            {4 7.473841554559044E-4, 3 7.473841554559044E-4, 2 0.014200298953662182, 1 0.984304932735426}],;del lens
-   :tmatrix {\A {\T 0.27785434114279656, \G 0.5916463479274886, \C 0.1304993109297148},
-             \C {\T 0.3725585345141332, \G 0.39196894334586924, \A 0.23547252213999756},
-             \G {\T 0.3318593853636966, \C 0.05328321910236568, \A 0.6148573955339376},
-             \T {\G 0.18420299532576553, \C 0.4722884670418774, \A 0.34350853763235717},
-             \- {\T 0.07349451201423911, \G 0.1832542272322753, \C 0.1261495105309997, \A 0.617101750222486}}})
+  {:overall 0.007994311914897497,
+   :totals {:sub 0.4827822120866591, :del 0.3372862029646522, :ins 0.1799315849486887},
+   :mrates [1.2865038634616492E-4 4.794764044738977E-5 8.98790370363618E-5],
+   :lrates [{3 0.0038022813688212928, 2 0.03802281368821293, 1 0.9581749049429658} {16 6.76132521974307E-4, 9 6.76132521974307E-4, 4 0.0074374577417173765, 3 0.016903313049357674, 2 0.08384043272481406, 1 0.8904665314401623}],
+   :tmatrix {\A {\T 0.2690812995491994, \G 0.6841287113321933, \C 0.04678998911860718}, \C {\T 0.40845990527519194, \G 0.3512983831455169, \A 0.2402417115792912}, \G {\T 0.6201950659781984, \C 0.05220883534136546, \A 0.32759609868043604}, \T {\G 0.14688362632573004, \C 0.5754758099665843, \A 0.2776405637076856}, \- {\T 0.12369760116307243, \G 0.32117761085534285, \C 0.20002423067603584, \A 0.3551005573055488}}})
 
 (def mutation-rates-const-region
-  {:mrates [0.03223329251605598 0.009255832498587937 0.055500963713136585]
-   :lrates [{1 0.8612541764542815, 2 0.09524504296823706, 3 0.02335896350982652,
-             4 0.010891609156830418, 5 0.004501086972380689, 6 0.0024073884941420215,
-             7 0.0013277112301025692, 8 6.127897985088781E-4, 9 2.6262419936094777E-4,
-             10 1.0213163308481302E-4, 11 2.1885349946745648E-5, 12 1.4590233297830432E-5}
-            {9 1.2165982938425528E-6, 8 5.718011981059998E-5, 7 1.7275695772564248E-4,
-             6 3.69845881328136E-4, 5 0.0010474911309984378, 4 0.0031911373247490156,
-             3 0.019055579076455904, 2 0.12037023519278217, 1 0.8557345577178562}],
-   :tmatrix {\A {\T 0.33324249405940765, \G 0.44204819655407135, \C 0.2247093093865209},
-             \C {\T 0.3450192114665972, \G 0.40237560831433644, \A 0.2526051802190663},
-             \G {\T 0.46401157839942464, \C 0.17467195036453304, \A 0.36131647123604227},
-             \T {\G 0.22885529437082425, \C 0.4907117501616078, \A 0.28043295546756797},
-             \- {\T 0.25210274423815193, \G 0.16376058545660183, \C 0.1908705929051287, \A 0.3932660774001174}}})
+  {:overall 0.08580696500078834,
+   :totals {:sub 0.3287608603446824, :del 0.5896483534297089, :ins 0.08159078622560872},
+   :mrates [0.028209971637225224 0.0070010577380476115 0.05059593562551548],
+   :lrates [{9 1.9289193229493178E-5, 8 1.1573515937695906E-4, 7 2.1218112552442495E-4,
+             6 0.0014466894922119883, 5 0.0074359839899696195, 4 0.009519216858754882,
+             3 0.025558181029078458, 2 0.09354294256642716, 1 0.862149780585427}
+            {1 0.758103669855776, 2 0.1681388884069711, 3 0.0528878811617451,
+             4 0.01526715519783911, 5 0.0035205205779632494, 6 0.0011543784306058417,
+             7 6.752780183659606E-4, 8 2.3354476919771366E-4, 9 4.003624614817948E-6,
+             10 4.003624614817948E-6, 11 1.3345415382726495E-6, 13 2.669083076545299E-6,
+             14 2.669083076545299E-6, 15 2.669083076545299E-6, 17 1.3345415382726495E-6}],
+   :tmatrix {\A {\T 0.33469268407802627, \G 0.4642048803068977, \C 0.20110243561507593},
+             \C {\T 0.3532442874834455, \G 0.3930922401972083, \A 0.25366347231934616},
+             \G {\T 0.39803274512067444, \C 0.18781273262132134, \A 0.41415452225800414},
+             \T {\G 0.22932979622636543, \C 0.5287716493922594, \A 0.24189855438137509},
+             \- {\T 0.33998587240298017, \G 0.2370278272296705, \C 0.2566282771490891, \A 0.16635802321826024}}})
+
+(defn simulate-seq []
+  (let [primer-mrate mutation-rates-primer-region
+        const-mrate mutation-rates-const-region
+        bprobs (apply hash-map (interleave [\A \C \G \T] (repeat 0.25)))]
+    (str/upper-case
+     (str (simulate prime5-const primer-mrate)
+          (generate-rand-seq 30 bprobs)
+          (simulate2 prime3-const const-mrate)
+          (simulate cds primer-mrate)))))
+
+(def background-seqs (future (doall (repeatedly 1e6 simulate-seq))))
+
+(def background-stats
+  (let [cnt (count @background-seqs)
+        kmerfn (fn [n inseqs]
+                 (->> (map #(freqn n %) inseqs)
+                      (apply merge-with +)
+                      (reduce-kv (fn [M k v]
+                                   (assoc M k (double (/ v (count inseqs)))))
+                                 {})))
+        [kmer2 kmer3 kmer4 kmer5]
+        (pmap #(kmerfn % @background-seqs) [2 3 4 5])]
+    {:n cnt
+     :kmer2 kmer2
+     :kmer3 kmer3
+     :kmer4 kmer4
+     :kmer5 kmer5
+    :len-dist (probs 1 (map count @background-seqs))}))
+
+(let [sqs (->> (sql-query "SELECT SUBSTRING(sr.sequence, sr.usable_start+1, sr.length) as hit_seq FROM selex_reads as sr WHERE sr.usable=1 AND sr.strand=1 ;")
+                                     (map :hit_seq))
+                            re #"T[CGT][GC][TGA]T" ;#"A[ACT][CG][ACG]A"
+                            fun (fn [sqs] (->> sqs
+                                               ;(filter #(re-find re %) ) 
+                                               (map (fn [s]
+                                                      (->> (str-re-pos re s)
+                                                           (remove #(<= 15 (first %) 45)))))))
+                            normalize (fn [x] (mean (map count x)))]
+                        [(normalize (fun sqs)) (normalize (fun @background-seqs))
+                         (frequencies (mapcat #(map first %)(fun sqs)))
+                         (reduce (fn [M [v k]]
+                                   (assoc-in M [k v] (inc (get-in M [k v] 0))))
+                                 {} (apply concat (fun sqs)))])
+
+(let [stmt "SELECT sr.sequence, sr.usable_start, sr.usable_stop 
+                                              FROM selex_reads as sr 
+                                             WHERE sr.usable=1 
+                                               AND sr.strand=1;"
+      sqs (get-db-seq stmt)
+      kmer (pmap #(kmer-freqn % sqs) [2 3 4 5])
+      chisq (fn [Mobs Mexp]
+              (as-> (merge-with - Mobs Mexp) x
+                    (merge-with (fn [num denom] (/ (sqr num) denom)) x Mexp)))]
+  (map #(->> (chisq %1 %2) (sort-by val > ) (take 10))
+       kmer
+       (map background-stats [:kmer2 :kmer3 :kmer4 :kmer5])))
+
+"SELECT SQL_CALC_FOUND_ROWS foo.hit_seq FROM (SELECT SUBSTRING(sr.sequence, sr.usable_start+1, sr.length) as hit_seq FROM selex_reads as sr WHERE sr.usable=1 AND sr.strand=1) as foo WHERE foo.hit_seq REGEXP 'A[ACT][GC][ACG]A.+T[CGT][GC][TGA]T' LIMIT 10; select found_rows();"
