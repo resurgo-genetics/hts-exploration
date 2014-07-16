@@ -4,6 +4,7 @@
             [clojure.contrib.io :as io]
             [clojure.core.reducers :as r]
             [clojure.math.numeric-tower :as math]
+            iota
             [clojure.java.jdbc :as jdbc]
             edu.bc.utils.probs-stats
             gibbs-sampler
@@ -244,6 +245,8 @@
       clojure.set/map-invert 
       clojure.set/map-invert))
 
+(defn str-partition [n s] (map #(apply str %) (partition n 1 s)))
+
 (defn str-take-last [n s] (apply str (take-last n s)))
 
 (defn str-insert-at [n insertion s]
@@ -446,3 +449,18 @@
        (reduce-kv (fn [M k v]
                     (assoc M k (double (/ v (count inseqs)))))
                   {})))
+
+(defn melt-temp
+  "Finds the melting temp of a short seq of length len using the 2-4
+  rule. Only returns those seq with temp >= 60. "
+
+  [s]
+  (let [m {\G 4 \C 4 \T 2 \A 2}
+        scorefn (fn [s] (reduce + (map m s)))
+        calc-temp (fn [len s]
+                    (->> (str-partition len s)
+                         (map-indexed (fn [i s] [(inc i) (scorefn s) len s]))
+                         (filter #(>= (second %) 60))))]
+    (->> (for [len (range 19 25)] (calc-temp len s))
+         (remove empty?)
+         first)))

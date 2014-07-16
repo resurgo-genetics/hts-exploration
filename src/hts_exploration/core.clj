@@ -15,6 +15,7 @@
         edu.bc.bio.sequtils.files
         edu.bc.utils.probs-stats
         edu.bc.utils
+        hts-exploration.db-queries
         hts-exploration.globals
         hts-exploration.utils))
 
@@ -576,35 +577,6 @@
 
 cmalign --noprob -o s15-round11-cdhit-cluster-17-cmsearch-2.sto test.cm s15-round11-cdhit-cluster-17-cmsearch-2.fna
 
-
-
-(time
- (let [st prime3-const
-       get-subs (fn [c] (markov-step (get t-matrix c)))
-       {:keys [mrates lrates tmatrix]} mutation-rates-const-region]
-   (pp/pprint 
-    (doall
-     (for [i (range 10)
-           :let [get-locs (fn [s rate] (-> (mut-locations rate (count s)) reverse vec))
-                 [srate irate drate] mrates]]
-       (let [add-subs (fn [s loc] (str-replace-at loc (get-subs (str/get s loc)) s))
-             add-ins (fn [s loc] 
-                       (let [size (-> (first lrates) markov-step)]
-                         (prn :ins loc)
-                         (prn :before @del-locs) 
-                         (as-> size n
-                               (repeatedly n #(get-subs \-))
-                               (apply str n)
-                               (str/lower-case n)
-                               (str-insert-at loc n s))))
-             add-del (fn [s loc] (prn :del loc) 
-                       (-> (second lrates) markov-step
-                           (str-remove-at loc s)))]
-         (as-> prime3-const st
-               (reduce add-del st (get-locs st drate))
-               (reduce add-subs st (get-locs st srate))
-               (reduce add-ins st (get-locs st irate)))))))))
-
 ;;;identification of high indels
 (time 
  (let [stmt "SELECT sr.sequence, sr.usable_start, sr.usable_stop 
@@ -678,10 +650,10 @@ cmalign --noprob -o s15-round11-cdhit-cluster-17-cmsearch-2.sto test.cm s15-roun
         const-mrate mutation-rates-const-region
         bprobs (apply hash-map (interleave [\A \C \G \T] (repeat 0.25)))]
     (str/upper-case
-     (str (simulate prime5-const primer-mrate)
+     (str (simulate2 prime5-const primer-mrate)
           (generate-rand-seq 30 bprobs)
           (simulate2 prime3-const const-mrate)
-          (simulate cds primer-mrate)))))
+          (simulate2 cds primer-mrate)))))
 
 (def background-seqs (future (doall (repeatedly 1e6 simulate-seq))))
 
@@ -693,9 +665,9 @@ cmalign --noprob -o s15-round11-cdhit-cluster-17-cmsearch-2.sto test.cm s15-roun
                       (reduce-kv (fn [M k v]
                                    (assoc M k (double (/ v (count inseqs)))))
                                  {})))
-        [kmer2 kmer3 kmer4 kmer5]
-        (pmap #(kmerfn % @background-seqs) [2 3 4 5])]
+        [kmer1 kmer2 kmer3 kmer4 kmer5] (pmap #(kmerfn % @background-seqs) (range 1 6))]
     {:n cnt
+     :kmer1 kmer1
      :kmer2 kmer2
      :kmer3 kmer3
      :kmer4 kmer4
@@ -717,11 +689,7 @@ cmalign --noprob -o s15-round11-cdhit-cluster-17-cmsearch-2.sto test.cm s15-roun
                                    (assoc-in M [k v] (inc (get-in M [k v] 0))))
                                  {} (apply concat (fun sqs)))])
 
-(let [stmt "SELECT sr.sequence, sr.usable_start, sr.usable_stop 
-                                              FROM selex_reads as sr 
-                                             WHERE sr.usable=1 
-                                               AND sr.strand=1;"
-      sqs (get-db-seq stmt)
+(let [sqs (->> (round-all-usable-seqs 11) sql-query (mapv :hit_seq ))
       kmer (pmap #(kmer-freqn % sqs) [2 3 4 5])
       chisq (fn [Mobs Mexp]
               (as-> (merge-with - Mobs Mexp) x
@@ -730,4 +698,58 @@ cmalign --noprob -o s15-round11-cdhit-cluster-17-cmsearch-2.sto test.cm s15-roun
        kmer
        (map background-stats [:kmer2 :kmer3 :kmer4 :kmer5])))
 
-"SELECT SQL_CALC_FOUND_ROWS foo.hit_seq FROM (SELECT SUBSTRING(sr.sequence, sr.usable_start+1, sr.length) as hit_seq FROM selex_reads as sr WHERE sr.usable=1 AND sr.strand=1) as foo WHERE foo.hit_seq REGEXP 'A[ACT][GC][ACG]A.+T[CGT][GC][TGA]T' LIMIT 10; select found_rows();"
+(def mean-sd ((juxt mean sd) (map #(-> % fold second) (take 10000 @background-seqs))))
+(let [sqs (->> (round-all-usable-seqs 11) sql-query (mapv :hit_seq )
+                                     (filter #(re-find #"A[ACT][CG][ACG]A.{3,}T[CGT][GC][TGA]T" %)))
+                            foo (->> (map #(vector % (count (re-seq #"A[ACT][CG][ACG]A" %))) sqs)
+                                     (group-by second)
+                                     (sort-by key >)
+                                     (map #(->> % second (sort-by count >)));sort on length
+                                     )
+                            trivial-zscore (fn [s] (/ (- (-> s fold second) (first mean-sd)) (second mean-sd)))
+                            chisq (fn [Mobs Mexp]
+                                    (as-> (merge-with - Mobs Mexp) x
+                                          (merge-with (fn [num denom] (/ (sqr num) denom)) x Mexp)))]
+                        (for [xxx foo]
+                          (reduce (fn [V data]
+                                    ;;data is formated [seq motif-cnt [chisq-kmer2 chisq-kmer3 ... kmer5]]
+                                    (if (and (<= (-> data first count) 87)
+                                             (>= (-> data last first) 25)
+                                             (>= (-> data last second) 83)
+                                             (>= (-> data last third) 293))
+                                      (let [dist (levenshtein (first data) bob)
+                                            z (trivial-zscore (first data))]
+                                        (if (<= dist 27) 
+                                          (->> (conj V (conj data dist z))
+                                               (sort-by last )
+                                               (take 3))
+                                          V))
+                                      V)) []
+                                  (map (fn [[s cnt]]
+                                         [s cnt 
+                                          (map #(apply + (map second (chisq %1 %2)))
+                                               (map #(kmer-freqn % [s]) [2 3 4 5])
+                                               (map background-stats [:kmer2 :kmer3 :kmer4 :kmer5]))])
+                                       xxx))))
+
+["TGCGTAACGTACACTATCGAAAGGAGAATGGAATCGAGCAATCGATCATTCTATCTTAGGATTTAAAAATGTCTCTAAGTACT" 5 ;pick this one
+  (20.58710780740946;most deviation from expected dimer count...
+   100.35018189484066
+   389.83382282396497
+   1514.1072691229554) 22]
+["TGCGTAACGTACACTGTCAAACAAAACAAAAGACGAAGACGCACTTCATTCAATACTTGGACTCTTAAAATGTCTCTAAGTACT" 4 (25.450923249798738 89.96136254358372 403.93468076920476 1608.6484871597056) 27 -0.5247170019887462]
+["TGCGTAACGTACACTCACGAAGAGGACGGAAGACAGATGAAGAGCTCGTTCTATACTTTGGAGATTTAAAATGTCTCTAAGTACT" 3 (29.843538435035306 93.35265995533078 394.51988629953615 1588.9677584109838) 22 -0.8349109319076299]
+["TGCGTAACGTACACTAACGATTCGAAAGTGAAAGAAAGAGAAATCATTCTTATACTTTGGAGAGTTAAAATGTCTCTAAGTACT" 2 (27.700575628411325 86.44315532626388 414.62469863857905 1431.9806485636368) 22 -1.004107620954294]
+["TGCGTAACGTACACTGGGAGCCGCCCCACCCAGGCGCCCTCGGTGTCATTCTATACGCTTTGGGGTTTTAAAATGTCTCTAAGTACT" 1 (34.66052698680395 96.3740191847706 334.6083922999456 1343.6005201916003) 23 -3.1754651303864803]
+["TGCGTAACGTACACTGCGGACAGCGAGACAGATCGAAGGTTTTGATCATTCTATACTTTGGATTTTAAAATGTCTCTAAGTACT" 3955];most frequent in round11
+["TGCGTAACGTACACTGCGGGAACAGACCCAACCTACCCTGCGGTGTCTTCTATTACTTTGAGTTTTAAAATGTCTCTAAGTACT" 1085];second
+["TGCGTAACGTACACTGTGACGAAGACAAAGACTAGGTTACTGACTTCATTCTATAACTTGGTTTTAAAATGTCTCTAAGTACT" 696];third
+"TGCGTAACGTACACTCGATCACACGAGAACATCGGTGATTTGGTGTCAATTCTATATACTTTGGGAGTTTTTAAAATGTCTCTAAGTACT" ;cluster17-108
+"TGCGTAACGTACACTACCCAAGACGGCTCTACAGTAAGATAGCCTATCATTCTATATGCTTTGGAGTTTTTAAAATGTCTCTAAGTACT" ;cluster17-157
+"TGCGTAACGTACACTGGGCAGATCGCACACACGTCTTGCTCGGTGTCATTCTATATACTTTGGGAGTTTTAAAATGTCTCTAAGTACT" ;cluster7-2147
+"TGCGTAACGTACACTCGATCACACGAGAACATCGGTGATTTGGTGTCAATCCTATATACTTTGGGAGTTTTAAAATGTCTCTAAGTACT" ;cluster7-255
+"TGCGTAACGTACACTCGGCAAATCCACTAACGGACTACTGGGTGATCATTCAATATACTTTTGGAGTTTTAAAATGTCTCTAAGTACT" ;cluster7-637
+"TGCGTAACGTACACTAGGCAAACCGATCCTAACGAATGCTTGGTGTCATTCTATATACCTTGGAGTGTTTTAAAATGTCTCTAAGTACT" ;cluster7-73
+
+
+
