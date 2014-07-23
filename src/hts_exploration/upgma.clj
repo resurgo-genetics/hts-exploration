@@ -46,14 +46,21 @@
         [t stack]))))
 
 (defn add-weights [weights tree]
-  (let [S (tree-traversal tree)
-        add-edge (fn [node new-edge] (conj node (/ (weights new-edge) 2)))]
+  (let [[start order] (tree-traversal tree)
+        edge-weight (fn [new-edge] (/ (weights new-edge) 2))]
     (second
      (reduce (fn [[k V] x]
-               (let [nextk [k x]]
-                 [nextk [V (add-edge x nextk)]]))
-             [(first S) (add-edge (first S) (first S))]
-             (reverse (second S))))))
+               (doall (let [nextk [k x]
+                            _ (prn :countx (count x) :x x
+                                   :adding [nextk [[V x] (edge-weight nextk)]])]
+                        (cond (> (count x) 2) 
+                              [nextk [[V (->> x tree-traversal (add-weights weights))] (edge-weight nextk)]]
+                              (= (count x) 2)
+                              [nextk [[V [x (edge-weight x)]] (edge-weight nextk)]]
+                              :else
+                              [nextk [[V x] (edge-weight nextk)]]))))
+             [start [start (edge-weight start)]]
+             (reverse order)))))
 
 (defn -main [distfn dist-matrix]
   (binding [*M* dist-matrix]
