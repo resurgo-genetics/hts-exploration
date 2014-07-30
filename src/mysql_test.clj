@@ -76,6 +76,26 @@
    LIMIT 3;"
    "rpl" 738]) ;args
 
+(def query-operon5
+  "select be.bioentry_id, be.name, be.description,sq.seqfeature_id, sq.type_term_id,sqv.term_id, sqv.value, loc.location_id, op.operon_id, opl.start_pos, opl.end_pos, opl.strand
+   FROM bioentry as be, seqfeature as sq, location as loc, seqfeature_qualifier_value as sqv, operon as op, operon_loc as opl, taxon as tx, ancestor as an
+   WHERE be.description not REGEXP 'plasmid'
+     and be.taxon_id=tx.taxon_id
+     and tx.ncbi_taxon_id=an.ncbi_taxon_id
+     and an.ancestors REGEXP 'enterobacteria'
+     and sqv.seqfeature_id=sq.seqfeature_id
+     and be.bioentry_id=sq.bioentry_id
+     and loc.seqfeature_id=sq.seqfeature_id
+     and sqv.term_id=14
+     and sq.type_term_id=13
+     and op.bioentry_id=be.bioentry_id
+     and opl.start_pos=loc.start_pos
+     and opl.end_pos=loc.end_pos
+     and opl.strand=loc.strand
+     and opl.operon_id=op.operon_id
+     and sqv.value REGEXP '^rp[lms]'
+   limit 1000;")
+
 (defn map->entry [sqlout]
   (let [{:keys [accession start_pos end_pos strand]} sqlout]
     (make-entry [accession [start_pos end_pos] strand])))

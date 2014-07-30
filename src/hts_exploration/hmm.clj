@@ -61,26 +61,34 @@
               l (keys initial)]
           (fun path pos k l))))))
 
-(reduce (fn [astar [state1 state2]]
-          (update-in astar [state1 state2] (fn [_] (/ (sum 
-                                                      (for [i (range (dec (count path)))]
-                                                        (psi path i state1 state2)))
-                                                     (sum
-                                                      (for [i (range (dec (count path)))]
-                                                        (gamma path i state1)))))))
-        transitions
-        (for [k (keys initial)
-              l (keys initial)]
-          [k l]))
+(defn update-initial [initial]
+  (reduce (fn [istar state]
+            (assoc istar state (gamma path 0 state)))
+          initial
+          (keys initial)))
 
-(reduce (fn [bstar [state emit]]
-          (update-in bstar [state emit] (fn [_] (/ (sum 
-                                                   (for [i (range (count path))]
-                                                     (* (if (= (path i) emit) (gamma path i state) 0))))
-                                                  (sum
-                                                   (for [i (range (count path))]
-                                                     (gamma path i state)))))))
-        emissions
-        (for [s (keys initial)
-              e [:A :B]]
-          [s e]))
+(defn update-transitions [transitions]
+  (reduce (fn [astar [state1 state2]]
+            (assoc-in astar [state1 state2] (/ (sum 
+                                                (for [i (range (dec (count path)))]
+                                                  (psi path i state1 state2)))
+                                               (sum
+                                                (for [i (range (dec (count path)))]
+                                                  (gamma path i state1))))))
+          transitions
+          (for [k (keys initial)
+                l (keys initial)]
+            [k l])))
+
+(defn update-emissions [emissions]
+  (reduce (fn [bstar [state emit]]
+            (assoc-in bstar [state emit] (/ (sum 
+                                             (for [i (range (count path))]
+                                               (* (if (= (path i) emit) (gamma path i state) 0))))
+                                            (sum
+                                             (for [i (range (count path))]
+                                               (gamma path i state))))))
+          emissions
+          (for [s (keys initial)
+                e [:A :B]]
+            [s e])))
