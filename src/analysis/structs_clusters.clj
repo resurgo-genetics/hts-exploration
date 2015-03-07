@@ -1,5 +1,6 @@
 (ns analysis.structs-clusters
   (:require [clojure.java.jdbc :as jdbc]
+            [clojure.core.reducers :as r]
             [clojure.contrib.io :as io]
             [clojure.contrib.string :as str]
             [clojure.pprint :as pp])
@@ -34,9 +35,9 @@
 (defn pairwise-distance 
   "Given a collection of strings, finds the pairwise distance between
   all of them. Returns a square 'matrix' of the results"
-  [coll]
+  [distfn coll]
   (for [i coll] 
-    (vec (for [j coll] (levenshtein i j)))))
+    (vec (for [j coll] (distfn i j)))))
 
 (defn get-seqs-centroid [round]
   (->> (round-all-usable-seqs-centroid round) sql-query
@@ -48,6 +49,12 @@
                      (assoc M k (conj cur-val [id (second sq)]))
                      M)))
                {})))
+
+(defn filter-doubletons
+  "Specific to getting doubletons which are in the data from some
+  variant of get-seqs."
+  
+  [get-sqs] (into {} (filter #(> (->> % second count) 1) get-sqs)))
 
 (def common-seqs (intersect-maps (get-seqs 10) (get-seqs 11)))
 

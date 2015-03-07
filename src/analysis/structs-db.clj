@@ -1,14 +1,17 @@
 (ns analysis.structs-db
   (:require [clojure.java.jdbc :as jdbc]
-            [clojure.contrib.io :as io])
+            [clojure.contrib.io :as io]
+            [clojure.java.shell :as shell])
   (:use edu.bc.utils.fold-ops
         hts-exploration.db-queries
         hts-exploration.globals
         hts-exploration.utils))
 
-(defn get-doubletons
-  "Specific to getting full length doubletons which have a variable
-  region between 28 and 32 nt in length."
+(defn- get-seqs-specific
+  "Specific to getting full length sequences in a round which have a
+  variable region between 28 and 32 nt in length. This is specific to
+  this ns unlike get-seqs which is used to simply store variable
+  regions with ids."
   
   [round]
   (->> (round-all-usable-seqs round) sql-query
@@ -18,8 +21,14 @@
                    (if (and sq (<= 28 cs 32)) ;standard sequence
                      (assoc M (second sq) (conj cur-val [id (first sq)]))
                      M)))
-               {})
-       (filter #(> (->> % second count) 1)))) ;doubleton
+               {})))
+
+(defn get-doubletons
+  "Specific to getting full length doubletons which have a variable
+  region between 28 and 32 nt in length."
+  
+  [round]
+  (filter #(> (->> % second count) 1) (get-seqs-specific round))) ;doubleton
 
 (defn- rnafold-shell [fasta]
   ((shell/sh "RNAfold"
@@ -31,23 +40,25 @@
 (defn- centroid-shell [fasta]
   ((shell/sh "/home/peis/bin/centroid_fold-0.0.9-x86_64-linux/centroid_fold" fasta) :out))
 
+(defn partition-seqs-to-fold [n sql-sqs]
+  (->> sql-sqs vals (apply concat)
+       (partition-into n)))
+
 (defn distribute-folding
   "Distribute RNAfold to multiple cpus by breaking into multiple fasta
   files and then using RNAfold on each file. The results are combined
   into the same file again for parsing."
 
-  [n round tmp-prefix]
-  (let [seqs-to-fold (->> (get-doubletons round)
-                          vals (apply concat)
-                          (partition-into n))]
-    (doall (map-indexed (fn [c p]
-                   (let [outfile (str tmp-prefix c ".fna")]
-                     (io/with-out-writer outfile
-                       (doseq [[id sq] p]
-                         (println (str ">" id))
-                         (println sq)))
-                     outfile))
-                 seqs-to-fold))))
+  [tmp-prefix sql-sqs]
+  (doall
+   (map-indexed (fn [c p]
+                  (let [outfile (str tmp-prefix c ".fna")]
+                    (io/with-out-writer outfile
+                      (doseq [[id sq] p]
+                        (println (str ">" id))
+                        (println sq)))
+                    outfile))
+                sql-sqs)))
 
 (defn execute-folding [shell-fold outfile & files-to-fold]
   (io/with-out-writer outfile
@@ -88,26 +99,36 @@
   to if the sequence exists and the MFE/centroid flags"
 
   [type structs-to-add]
+  {:pre [(or (= type :centroid)
+             (= type :MFE))]}
   (let [S (->> (jdbc/query mysql-ds "SELECT * FROM selex_structs;")
                (map (fn [x] [(x :structure) {:MFE (when (x :MFE) :MFE)
                                            :centroid (when (x :centroid) :centroid)}]))
                (into {}))]
-    (group-by (fn [x]
-                (let [st (first x)]
-                  (if (contains? S st)
-                    (if (= type (get-in S [st type]))
-                      :ignore
-                      :update)
-                    :insert)))
+    (group-by (fn [st]
+                (if (contains? S st)
+                  (if (= type (get-in S [st type]))
+                    :ignore
+                    :update)
+                  :insert))
               structs-to-add)))
 
 (defn insert-struct [data & {:keys [MFE centroid] :as x}]
   (jdbc/with-db-transaction [c mysql-ds]
     (doseq [i data
             :let [d (->> (interleave [:structure :deltaG] i)
+                         (apply hash-map))
+                  d (if centroid (assoc d :centroid 1) d)
+                  d (if MFE (assoc d :MFE 1) d)]]
+      (jdbc/insert! c :selex_structs d))))
+
+(defn update-struct [data & {:keys [MFE centroid] :as x}]
+  (jdbc/with-db-transaction [c mysql-ds]
+    (doseq [i data
+            :let [d (->> (interleave [:structure :deltaG] i)
                          (concat (filterv (complement (comp nil? second)) x));mfe/centroid flags
                          (apply hash-map ))]]
-      (jdbc/insert! c :selex_structs d))))
+      )))
 
 (defn selex-id->struct-id [struct-parser f]
       (let [data (->> f read-structs
