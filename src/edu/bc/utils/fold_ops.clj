@@ -153,15 +153,18 @@
     ((or (first args) {}) :foldmethod)))
 
 (defmethod fold :RNAfold [s args]
-  (-> ((shell/sh "RNAfold"
-                 "-P" param-file
-                 "--noPS"
-                 :in s )
-       :out)
-      str/split-lines
-      second
-      (str/split #" ")
-      first))
+  (let [[st nrg] (as-> (shell/sh "RNAfold"
+                                    "-P" param-file
+                                    "--noPS"
+                                    :in s)
+                          out
+                          (out :out)
+                          (str/split-lines out)
+                          (second out)
+                          (re-find #"([\.|\(]\S*[\.|\)]) \((.*)\)" out) ;split struct
+                                        ;and energy
+                          (rest out))]
+    [st (Double/parseDouble nrg)]))
 
 (defmethod fold :RNAfoldp [s args]
   (let [ensemble-div  (->> ((shell/sh "RNAfold"
@@ -347,3 +350,12 @@
                 [(apply str (rest nm))
                  (Integer/parseInt (re-find #"\d+" dist))]))
          (into {}))))
+
+(defn centroid-fold [fasta]
+  (-> ((shell/sh "centroid_fold"
+                   :in fasta)
+       :out)
+      (str/split-lines)
+      second
+      (str/split #"\s")
+      first))
