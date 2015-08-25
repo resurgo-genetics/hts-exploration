@@ -10,17 +10,7 @@
         hts-exploration.globals
         hts-exploration.utils))
 
-(defn intersect-maps 
-  "Finds the intersection of maps according to keys and concatenates
-  all the values associated with the keys. This is different than
-  merge because only intersecting keys are retained in a new map."
-  [& maps]
-  (reduce (fn [M x]
-            (assoc M x (mapcat #(get % x) maps)))
-          {}
-          (->> (map keys maps)
-               (map set)
-               (apply clojure.set/intersection))))
+
 
 (defn remove-empty-structs 
   "Only keep the centroid structures which have structure"

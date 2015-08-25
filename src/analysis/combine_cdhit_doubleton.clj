@@ -6,7 +6,8 @@
             [edu.bc.fs :as fs]
             [clojure.java.shell :as shell]
             [clojure.pprint :as pp]
-            [edu.bc.bio.sequtils.files :refer (read-seqs)])
+            [edu.bc.bio.sequtils.files :refer (read-seqs)]
+            [hts-exploration.hts-utils.file :refer (write-fasta)])
   (:use edu.bc.utils.fold-ops
         edu.bc.utils.probs-stats
         hts-exploration.db-queries
@@ -439,20 +440,24 @@
   
   [x y]
   (->> (set (concat (keys x) (keys y))) ;S
-       (map (fn [k]
-              (let [diff (- (get x k 0)
-                            (get y k 0))] ;(PAij-PBij)
-                (* diff diff))));sq
+       (mapv (fn [k]
+               (let [diff (- (get x k 0)
+                             (get y k 0))] ;(PAij-PBij)
+                 (* diff diff))));sq
        (reduce +)));sum
 
-(defn pairwise [f coll]
+(defn pairwise 
+  "takes a collection and applies the function f to the elements in a
+  pairwise fashion"
+
+  [f coll]
   (loop [x coll
          Vx []]
     (if (seq x)
       (recur (rest x)
              (concat Vx
                      (reduce (fn [Vy y]
-                               (conj Vy (f (first x) y)))
+                               (conj Vy (f (first x) y)));inner loop
                              [] (vec (rest x)))))
       Vx)))
 
@@ -468,7 +473,7 @@
            dirs))))
 
 ;;intracluster data file
-(with-open [out (clojure.java.io/writer "data/150122/intracluster-distance.csv")]
+(with-open [out (clojure.java.io/writer "results/150122/intracluster-distance.csv")]
   (.write out "cluster,ensemble distance\n")
   (doseq [[clstr dist] intracluster-dist]
     (.write out (str (fs/basename clstr) "," dist "\n"))))
@@ -500,10 +505,11 @@
         (pairwise ensemble-dist (map #(nth % 2) foo)))))
 
 ;;printing the above results into a file
-(with-open [out (clojure.java.io/writer "data/150122/intercluster-dist.csv")]
+(with-open [out (clojure.java.io/writer "results/150122/intercluster-dist.csv")]
   (let [;;last part of the above section to get results
         xs (map #(->> % flatten (str/join ","))
-                (map vector (pairwise vector (map #(nth % 3) foo))
+                (map vector 
+                     (pairwise vector (map #(nth % 3) foo))
                      (pairwise vector (map #(% 0) foo))
                      (map #(apply levenshtein %) (pairwise vector (map #(% 0) foo)))
                      (pairwise ensemble-dist (map #(nth % 2) foo))))]

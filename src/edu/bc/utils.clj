@@ -1179,3 +1179,5 @@
     (if stdout-file
       result
       (result :out))))
+
+(def reversev (comp vec reverse))

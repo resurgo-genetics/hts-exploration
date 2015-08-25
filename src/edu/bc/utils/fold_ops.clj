@@ -2,6 +2,7 @@
   (:require [clojure.contrib.io :as io]
             [clojure.string :as str]
             [clojure.java.shell :as shell]
+            [me.raynes.conch :refer [programs let-programs with-programs] :as sh2]
             [edu.bc.fs :as fs])
   (:use refold
         [edu.bc.bio.sequtils.files :only [join-sto-fasta-file]]
@@ -51,6 +52,8 @@
   (assert-tools-exist
    (mapv #(fs/join (get-tool-path (keyword %)) %) tools)))
 
+(sh2/programs cat)
+
 (defn inverse-fold
   "Given a target structure, it will use RNAinverse to find n
    sequences which fold into a similar structure. If :perfect? is
@@ -96,7 +99,7 @@
   [st]
   (reduce (fn [m kv] ;creates array of bp locations
             (assoc m kv 1))
-          {} (make_pair_table st)))
+          {} (make-pair-table st)))
 
 (defn calc-bp-prob
   "Takes a collection of structures and finds the bp probs for each
@@ -126,7 +129,7 @@
 
 (defn centroid-n-structs
   "Finds the centroid structure of suboptimal structures and a vector
-   representation using 0's and 1's using a RNAmutants or RNAsubopt. s
+  representation using 0's and 1's using a RNAmutants or RNAsubopt. s
    is the RNA sequence (case doesn't matter as it will be all
    upper-cased) and n is the number of suboptimal structures to
    consider."
@@ -143,28 +146,26 @@
 
 (ns-unmap 'edu.bc.utils.fold-ops 'fold)
 (defmulti
-  ^{:doc "folds an RNA (s) into a structure using the method
+  ^{:doc "folds an RNA(s) (inseqs) into a structure using the method
                specified by :foldmethod. possible :foldmethod
                are :RNAfold, :RNAfoldp, :RNAsubopt, :centroid."
-    :arglists '([s & args])}
+    :arglists '([inseqs & args])}
 
   fold
-  (fn [s & args]
+  (fn [inseqs & args]
     ((or (first args) {}) :foldmethod)))
 
-(defmethod fold :RNAfold [s args]
-  (let [[st nrg] (as-> (shell/sh "RNAfold"
-                                    "-P" param-file
-                                    "--noPS"
-                                    :in s)
-                          out
-                          (out :out)
-                          (str/split-lines out)
-                          (second out)
-                          (re-find #"([\.|\(]\S*[\.|\)]) \((.*)\)" out) ;split struct
+(defmethod fold :RNAfold [inseqs args]
+  (let [parser (fn [out]
+                 (->> out
+                      rest
+                      (take-nth 2)
+                      (map #(rest (re-find #"([\.|\(]\S*[\.|\)]) \((.*)\)" %))) ;split struct
                                         ;and energy
-                          (rest out))]
-    [st (Double/parseDouble nrg)]))
+                      (map (juxt first #(Double/parseDouble (second %))))))
+        ]
+    (sh2/with-programs [RNAfold]
+      (parser (RNAfold "--noPS" "-P" param-file {:in (cat {:in inseqs}) :seq true})))))
 
 (defmethod fold :RNAfoldp [s args]
   (let [ensemble-div  (->> ((shell/sh "RNAfold"
@@ -182,13 +183,9 @@
     ensemble-div))
 
 (defmethod fold :RNAsubopt [s args] 
-  (->> ((shell/sh "RNAsubopt"
-                  "-p" (str (args :n))        ;samples according to
-                                        ;Boltzmann distribution
-                  :in s)
-        :out)
-       str/split-lines
-       (remove #(re-find #"[^\(\)\.]" %))))
+  (sh2/with-programs [RNAsubopt]
+    (->> (RNAsubopt "-p" (:n args) "-P" param-file {:in (cat {:in s}) :seq true})
+         (remove (partial re-find #"[^\(\)\.]")))))
 
 (defmethod fold :centroid [s args]
   (first (centroid-n-structs s (args :n))))
@@ -214,49 +211,6 @@
          (map last)
          (map #(str/split % #" "))
          (map first))))
-
-(comment 
-  (defn fold
-    "Folds a sequence of RNA and returns only the target
-   structure. Target structure can either be centroid or MFE."
-    
-    [s & {:keys [foldtype n]
-          :or {foldtype "mfe" n 10000}}]
-    (case foldtype
-      "mfe"
-      (-> ((shell/sh "RNAfold"
-                     "-P" param-file
-                     "--noPS"
-                     :in s)
-           :out)
-          (str/split-lines)
-          second
-          (str/split #" ")
-          first)
-      
-      "centroid"
-      (first (suboptimals s n))
-      
-      "RNAmutants"
-      0 #_(->> ((shell/sh "./RNAmutants"
-                          "-l" "./lib/"
-                          "--mutation" "1"
-                          "-n" (str n)
-                          "--input-string" s
-                          :dir "/home/kitia/Desktop/RNAmutants/")
-                :out)
-               (drop-until #(re-find #"\> sampling \d+" ))
-               (remove #(re-find #"[^\(\)\.]" %)))
-      
-      "RNAsubopt"
-      (->> ((shell/sh "RNAsubopt"
-                      "-p" (str n) ;samples according to
-                                        ;Boltzmann distribution
-                      :in s)
-            :out)
-           str/split-lines
-           (remove #(re-find #"[^\(\)\.]" %)))
-      )))
 
 (defn align-fold
   "Takes a fasta file and outputs an alignment with structure in
@@ -321,14 +275,14 @@
 
 (defn bpdist
   "finds the distance between 2 structures. uses tree edit distance by
-  default. when bpdist = true, uses base pair distance"
-
-  [st1 st2 & {:keys [bpdist]}]
-  (->> ((shell/sh "RNAdistance" (if bpdist "-DP" "")
-                  :in (str st1 "\n" st2))
-        :out)
-       (re-find #"\d+" )
-       (Integer/parseInt)))
+  default. when bpdist = \"-DP\", uses base pair distance. Using
+  \"-Xm\" will do bpdist in a pairwise manner. Using 'Xf' will compare
+  each structure with the first one"
+  
+  [structs & args]
+  (let [parser (fn [out] (map #(Integer/parseInt (re-find #"\d+" %)) out))]
+    (sh2/with-programs [RNAdistance]
+      (parser ((apply partial RNAdistance args) {:in (cat {:in structs}) :seq true})))))
 
 (defn bpdist-fasta
   "Uses RNAdistance on folded sequences in a given fasta file

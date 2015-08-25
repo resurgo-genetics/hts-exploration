@@ -3,7 +3,7 @@
 
 ;;creates a list of where the base pairings are located
 ;;according to index number
-(defn make_pair_table [structure]
+(defn make-pair-table [structure]
   (loop [c (rest (str/split #"" structure))
          s [] ;;stack structure which stores the location of the
          ;;opening ( so that closing parens pop location
