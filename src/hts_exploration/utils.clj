@@ -8,7 +8,8 @@
             [clojure.java.jdbc :as jdbc]
             edu.bc.utils.probs-stats
             gibbs-sampler
-            [smith-waterman :as sw])
+            [smith-waterman :as sw]
+            [edu.bc.bio.seq-utils :refer (reverse-compliment markov-step)])
   (:use [clojure.contrib.core :only [dissoc-in]]
         hts-exploration.globals
         hts-exploration.db-queries
@@ -16,7 +17,6 @@
         edu.bc.utils
         edu.bc.utils.probs-stats
         edu.bc.bio.sequtils.files
-        [edu.bc.bio.seq-utils :only (markov-step)]
         edu.bc.utils.fold-ops))
 
 
@@ -114,7 +114,11 @@
   (/ (int (* x (Math/pow 10 n)))
      (Math/pow 10 n)))
 
-(defn mutant-neighbor [n inseq & type]
+(defn mutant-neighbor
+  "Creates a list of n-mutant neighbors of type :RNA or :DNA. :RNA is
+  used by default."
+
+  [n inseq & type]
   (let [b (case (first type)
             :RNA [\A \C \G \U]
             :DNA [\A \C \G \T]
@@ -139,6 +143,8 @@
       clojure.set/map-invert))
 
 (defn str-partition [n s] (map #(apply str %) (partition n 1 s)))
+
+(defn str-partition-all [n s] (map #(apply str %) (partition-all n 1 s)))
 
 (defn str-take-last [n s] (apply str (take-last n s)))
 
@@ -175,7 +181,8 @@
   rule. Only returns those seq with temp >= 60. "
 
   [s]
-  (let [m {\G 4 \C 4 \T 2 \A 2}
+  (let [s (str/upper-case s)
+        m {\G 4 \C 4 \T 2 \A 2}
         scorefn (fn [s] (reduce + (map m s)))
         calc-temp (fn [len s]
                     (->> (str-partition len s)
@@ -185,15 +192,37 @@
          (remove empty?)
          first)))
 
+(defn design-primer
+  "Takes a sequence and designs primers for it so that it can be
+  created by annealing the 2 primers together. These primers need to
+  overlap ~20 bases in the middle. "
+  
+  [s]
+  (let [mid (quot (count s) 2)
+        near-mid? (fn [flen] (<  (- mid 10) flen (+ mid 10)))
+        overlap (last
+                 (take-while (fn [x]
+                               (let [pos (first x)]
+                                 (< pos mid)))
+                             (melt-temp s)))
+        flen (+ (overlap 0) (overlap 2))];forward primer length
+    (vec
+     (concat [:seq s :overlap overlap]
+             (if (near-mid? flen)
+               [:f (str/take flen s) :r (reverse-compliment (str/drop (overlap 0) s))]
+               [:f (str/take (+ mid 10) s) :r (reverse-compliment (str/drop (- mid 10) s))])))))
+
 (defn const-start
   "attempts to find the start of the constant region in a sequence"
   
   [s]
-  (let [dists (map-indexed (fn [i x] [i (levenshtein prime3-const x)])
-                           (str-partition 20 s))
-        m (apply min (map second dists))]
-    (-> (drop-while #(not= (second %) m) dists)
-        ffirst inc)))
+  (if (> (count s) 20)
+    (let [dists (map-indexed (fn [i x] [i (levenshtein prime3-const x)])
+                            (str-partition 20 s))
+         m (apply min (map second dists))]
+     (-> (drop-while #(not= (second %) m) dists)
+         ffirst inc))
+    1))
 
 (defn rand-sequence
   ([n len]
@@ -216,9 +245,171 @@
   
   [round]
   (->> (round-all-usable-seqs round) sql-query
-       (reduce (fn [M {:keys [id hit_seq cs]}]
-                 (let [sq (second
-                           (re-find #"TGCGTAACGTACACT(.*)ATGTCTCTAAGTACT" hit_seq))
-                       cval (get M sq [])]
-                   (if sq (assoc M sq (conj cval id)) M)))
+       (map (juxt :id #(->> % :hit_seq (re-find #"TGCGTAACGTACACT(.*)ATGTCTCTAAGTACT")) :cs))
+       (filter #(if-let [cs (% 2)] (<= 28 cs 32)))
+       (filter second)
+       (reduce (fn [M [id [hit_seq sq] cs]]
+                 (let [k sq
+                       cval (get M k [])]
+                   (assoc M k (conj cval id))))
+               {}))) 
+
+(defn get-seqs-variable
+  "Get sequences from the database by round number. Returns a map of
+  the sequences' variable region (k) and the the IDs which also have
+  the same sequence (v).  "
+  
+  [round]
+  (->> (round-all-usable-seqs round) sql-query
+       (map (juxt :id #(->> % :hit_seq (re-find #"TGCGTAACGTACACT(.*)ATGTCTCTAAGTACT")) :cs))
+       (filter #(if-let [cs (% 2)] (<= 28 cs 32)))
+       (filter second)
+       (reduce (fn [M [id [hit_seq sq] cs]]
+                 (let [k (str/take cs sq)
+                       cval (get M k [])]
+                   (assoc M k (conj cval id))))
                {})))
+
+(defn parse-ps [f]
+  (with-open [infile (clojure.java.io/reader f)]
+    (let [ex-file (line-seq infile)
+          sq (->> (drop-while (complement #(= % "/sequence { (\\")) ex-file)
+                  second
+                  (str/replace-re #"U" "T")
+                  (str/butlast 1)
+                  (str/drop 15)
+                  (str/butlast 15))
+          bprobs (drop-while (complement #(= % "%start of base pair probability data")) ex-file)
+          ]
+      [sq
+       (fs/basename f)
+       (->> (filter #(re-find #"ubox" %) bprobs)
+            (map #(vec (str/split #" " %)))
+            (reduce (fn [M x]
+                      (let [i (read-string (x 0))
+                            j (read-string (x 1))
+                            p (read-string (x 2))]
+                        (assoc M [i j] (* p p))))
+                    {})
+            )])))
+
+(defn ensemble-dist
+  "Calculate the distance between 2 ensembles x and y. "
+  
+  [x y]
+  (->> (set (concat (keys x) (keys y))) ;S
+       (mapv (fn [k]
+               (let [diff (- (get x k 0)
+                             (get y k 0))] ;(PAij-PBij)
+                 (* diff diff))));sq
+       (reduce +)));sum
+
+(defn pairwise 
+  "takes a collection and applies the function f to the elements in a
+  pairwise fashion"
+
+  [f coll]
+  (loop [x coll
+         Vx []]
+    (if (seq x)
+      (recur (rest x)
+             (concat Vx
+                     (reduce (fn [Vy y]
+                               (conj Vy (f (first x) y)));inner loop
+                             [] (vec (rest x)))))
+      Vx)))
+
+(defn add-letters
+  "Takes a set of letters and creates all the combinations of it with n letters"
+  
+  [n xs]
+  (letfn [(helper [n i cur]
+            (if (< i n)
+              (let [new (for [c cur x xs] (str c x))]
+                (helper n (inc i) new))
+              cur))]
+    (helper n 1 xs)))
+
+(defn freqs-id-seq
+  "Takes id-seq pairs and returns a map where k=sequence and the value
+  is a list of ids which map to that particular sequence."
+  [id-seq]
+  (r/fold (fn ([] {})
+            ([& m] (apply merge-with (comp vec concat) m)))
+          (fn ([] {})
+            ([M [id s]] (assoc M s (conj (get M s []) id))))
+          id-seq))
+
+(defn intersect-maps 
+  "Finds the intersection of maps according to keys and concatenates
+  all the values associated with the keys. This is different than
+  merge because only intersecting keys are retained in a new map."
+  [& maps]
+  (reduce (fn [M x]
+            (assoc M x (map #(get % x) maps)))
+          {}
+          (->> (map keys maps)
+               (map set)
+               (apply clojure.set/intersection))))
+
+(defn vfold
+  "Fold function f over a collection or set of collections (c1, ...,
+   cn) producing a collection (concrete type of vector).  Arity of f
+   must be equal to the number of collections being folded with
+   parameters matching the order of the given collections.  Folding
+   here uses the reducer lib fold at base, and thus uses work stealing
+   deque f/j to mostly relieve the partition problem.  In signatures
+   with N given, N provides the packet granularity, or if (< N 1),
+   granularity is determined automatically (see below) as in the
+   base (non N case) signature.
+   While vfold is based on r/fold, it abstracts over the combiner,
+   reducer, work packet granularity, and transforming multiple
+   collections for processing by f by chunking the _transpose_ of the
+   collection of collections.
+   As indicated above, vfold's fold combiner is monoidal on vectors:
+   it constructs a new vector from an l and r vector, and has identity
+   [] (empty vector).  In line with this, vfold's reducer builds up
+   new vectors from elements by conjing (f a1, ... an) onto a prior
+   result or the combiner identity, [], as initial result.
+   Packet granularity is determined automatically (base case or N=0)
+   or supplied with N > 1 in signatures with N.  Automatic
+   determination tries to balance significant work chunks (keep thread
+   overhead low), with chunks that are small enough to have multiple
+   instances per worker queue (supporting stealing by those workers
+   that finish ahead of others).
+  "
+  ([f coll]
+     (let [cores (.. Runtime getRuntime availableProcessors)
+           workers (int (math/floor (* 3/4 cores)))
+           base (* 8 cores)
+           n (max 2 (int (math/floor (/ (count coll) (* 2 workers)))))
+           n (min base n)]
+       #_(println :>>N n)
+       (vfold f n coll)))
+  ([f n coll]
+     (assert (integer? n)
+             (str "VFOLD: Folding granularity N " n " must be an integer."))
+     (if (< n 1)
+       (vfold f coll)
+       (r/fold n
+               (fn
+                 ([] [])
+                 ([l r] (apply conj l r)))
+               (fn[v x] (conj v (f x)))
+               (vec coll))))
+  ([f n coll & colls]
+     (vfold (fn[v] (apply f v)) n (apply transpose coll colls))))
+
+(defn euclidean-dist
+  "calculate the euclidean distance between 2 vectors."
+  
+  [v1 v2]
+  (->> (map (comp sqr -) v1 v2); sq difference
+       sum
+       Math/sqrt))
+
+(defn select-vals
+  "get a collection of values associated with keyseq from a
+  map (m). Values are returned in the same order as the keyseq."
+  [m keyseq]
+  (map m keyseq))

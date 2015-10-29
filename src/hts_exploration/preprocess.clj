@@ -8,71 +8,108 @@
         hts-exploration.globals
         hts-exploration.utils))
 
+(defn- read-fastq
+  "reads a fastq and returns the lines as a tuple"
+  [infile]
+  (->> infile
+       io/read-lines
+       (partition 4)))
 
-(defn fastq->csv [infile]
+(defn fastq->csv
+  "Turn a fastq into a csv for faster reading using iota."
+  
+  [infile]
   (let [outfile (fs/replace-type infile ".csv")]
    (io/with-out-writer outfile
      (println "name,sequence,quality")
-     (doseq [[nm inseq _ qual] (->> infile
-                                    io/read-lines
-                                    (partition-all 4))]
+     (doseq [[nm inseq _ qual] (read-fastq infile)]
        (println (str/join "," [nm inseq qual]))))
    outfile))
 
-(defn fastq->table
-  ([round-number infile outfile] (fastq->table 0 round-number infile outfile))
-  ([id-start round-number infile outfile]
-     (let [r round-number
-           c (atom id-start)]
-       (io/with-out-writer outfile
-         (println (str "selex_id name sequence quality quality_filter standard_bases"
-                       " not_parasite parasite_type round_number usable strand"
-                       " from to length"))
-         (doseq [[nm inseq _ qual] (->> infile
-                                        io/read-lines
-                                        (partition-all 4)
-                                        ;(take 100)
-                                        )
-                 :let [qfilter (if (qual-good? 20 qual) 1 0)
-                       std-bases (if (standard-chars? inseq) 1 0)
-                       strand (cond (re-find forward-re inseq) 1
-                                    (re-find reverse-re inseq) -1
-                                    :else 0)]]
-           (let [[from to] (cond (= strand 1) (str-regex-index forward-re inseq)
-                                 (= strand -1) (str-regex-index reverse-re inseq)
-                                 (zero? strand) [-1 -1])
-                 s (when-not (zero? strand)
-                     (subs inseq from to))
-                 len (- to from)
-                 parasite-type (cond (nil? s) ""
-                                     (= strand 1) (first (parasite? s))
-                                     (= strand -1) (first (parasite-rev? s)))
-                 not-parasite (if-not parasite-type 1 0)
-                 usable? (if (= qfilter std-bases not-parasite 1) 1 0)]
-             (swap! c inc)
-             (->> [@c nm inseq qual qfilter std-bases
-                   not-parasite (or parasite-type "") r usable? strand
-                   from to len]
-                  (apply prn-str ) print;used in s15-round11-mysql.table
-                  ;;(str/join ",") prn;error checking
-                  ))))
-       outfile)))
+(defn quality-filter
+  "Takes a csv format of the fastq file and filters for sequences
+  which pass a quality filter. Creates a new csv of the fastq file."
 
-(defn quality-filter [infile]
+  [infile]
   (let [outfile (fs/replace-type infile ".qual-filter.csv")]
-   (io/with-out-writer outfile
-     (println "name,sequence,quality")
-     (doseq [x (->> infile
-                    iota/seq
-                    (r/drop 1) ;drop header
-                    (r/map #(vec (str/split #"," 3 %)))
-                    qual-remove
-                    (r/fold (fn ([] [])
-                              ([l r] (conj l r)))
-                            (fn ([] [])
-                              ([V x] 
-                                 (conj V (str/join "," x))))))];csv format
-       (println x)))))
+    (io/with-out-writer outfile
+      (println "name,sequence,quality")
+      (doseq [x (->> infile
+                     iota/seq
+                     (r/drop 1) ;drop header
+                     (r/map #(vec (str/split #"," 3 %)))
+                     qual-remove
+                     (r/fold (fn ([] [])
+                               ([l r] (conj l r)))
+                             (fn ([] [])
+                               ([V x] 
+                                (conj V (str/join "," x))))))];csv format
+        (println x)))))
+
+(defn- get-seq-info
+  "Tries to determine seq info such as strand, from, to, length, relevant seq"
+  [inseq]
+  (let [helper (fn [strand from s]
+                 (let [len (count s)
+                       to (+ from len)]
+                   [strand from to len s]))]
+    (if-let [x (first (str-re-pos forward-re inseq))]  ; forward strand
+      (apply helper 1 x)
+      (if-let [x (first (str-re-pos reverse-re inseq))]; reverse strand
+        (apply helper -1 x)
+        [0 -1 -1 0 nil]))))
+
+(defn- tuple->row
+  "takes a fastq tuple with a selex-id and determines other sequence values"
+  ([[nm inseq _ qual :as tuple]] (tuple->row 0 tuple))
+  ([c [nm inseq _ qual]]
+   (let [qfilter (if (qual-good? 20 qual) 1 0)
+         std-bases (if (standard-chars? inseq) 1 0)
+         [strand from to len s] (get-seq-info inseq)
+         parasite-type (cond (nil? s) (first (or (parasite? inseq) (parasite-rev? inseq) [\N]))
+                             (= strand 1) (first (parasite? s))
+                             (= strand -1) (first (parasite-rev? s)))
+         not-parasite (cond (zero? strand) 0
+                            (= \N parasite-type) 0
+                            parasite-type 0
+                            :else 1)
+         usable? (if (and (not (zero? strand))
+                          (= qfilter std-bases not-parasite 1)) 1 0)
+         cs (when (and s (= usable? 1))
+              (when-let [x (re-find #"TGCGTAACGTACACT(.*)ATGTCTCTAAGTACT" s)]
+                (const-start (second x))))]
+     [c nm inseq qual
+      qfilter std-bases not-parasite parasite-type
+      usable? strand
+      from to len cs])))
+
+(defn fastq->table
+  ([round-number infile outfile] (fastq->table 1 round-number infile outfile))
+  ([id-start round-number infile outfile]
+   (let [data (->> infile
+                   read-fastq                  ; fastq tuples
+                   (map vector (iterate inc id-start))) ; add selex-ids
+         ]
+     (io/with-out-writer outfile
+       (println (str "selex_id struct_id centroid_id name sequence base_quality quality_filter standard_bases"
+                     " not_parasite parasite_type round_number usable strand"
+                     " usable_start usable_stop length const_start"))
+       (doseq [data-slice (partition-all 100000 data); process N at a time
+               :let [tuple->row (partial apply tuple->row)
+                     out-rows (vfold tuple->row 30 data-slice)]]
+         (doseq [row out-rows
+                 :let [[c nm inseq qual
+                        qfilter std-bases not-parasite parasite-type
+                         usable? strand
+                        from to len cs] row]]
+           ;; destructure the row to add round (r) in right place
+           (->> [c \N \N nm inseq qual
+                 qfilter std-bases not-parasite (or parasite-type \N)
+                 round-number usable? strand
+                 from to len (or cs \N)]
+                (apply prn-str) print))))))); used in s15-round11-mysql.table
+
+
 
 (comment
   ;;process raw SELEX data
@@ -106,7 +143,7 @@
 
   "create table selex_reads (selex_id INT not NULL auto_increment, name varchar(70) not NULL, sequence VARCHAR(100) not NULL, base_quality varchar(100) not null, quality_filter INT(1), standard_bases INT(1), not_parasite INT(1), parasite_type varchar(100), round_number INT, usable INT(1), strand INT, primary key (selex_id, name));"
   
-  "load data local INFILE '/home/peis/S15SELEXHTSdata/s15-round11-mysql.table' into table selex_test FIELDS TERMINATED by ' ' ENCLOSED BY '\"' LINES TERMINATED BY '\n' IGNORE 1 ROWS;"
+  "load data local INFILE '/home/peis/S15SELEXHTSdata/s15-round11-mysql.table' into table selex_reads FIELDS TERMINATED by ' ' ENCLOSED BY '\"' LINES TERMINATED BY '\n' IGNORE 1 ROWS;"
 
   "alter table selex_test change id selex_id int;"
 
@@ -191,18 +228,18 @@
     (clojure.set/difference M2 M1)))
 
 (let [stmts (map (fn [part]
-                                         (str "select * from selex_reads as sr where sr.name IN "
-                                              (->> part
-                                                   (map first)
-                                                   pr-str
-                                                   (str/replace-re #"\"\s\"" "\",\""))
-                                              " ;"))
-                                       (partition-into 100 foo2))]
-                        (prn :count (count foo2)) (count
-                         (mapcat (fn [stmt]
-                                   (->> (mysql-test/sql-query stmt)
-                                        (map (fn [m]
-                                               [(m :name) 
-                                                (subs (m :sequence) (m :usable_start) (m :usable_stop))]))
-                                        #_(filter #(parasite-rev? (second %)))))
-                                 (take 2 stmts))))
+                   (str "select * from selex_reads as sr where sr.name IN "
+                        (->> part
+                             (map first)
+                             pr-str
+                             (str/replace-re #"\"\s\"" "\",\""))
+                        " ;"))
+                 (partition-into 100 foo2))]
+  (prn :count (count foo2)) (count
+                             (mapcat (fn [stmt]
+                                       (->> (mysql-test/sql-query stmt)
+                                            (map (fn [m]
+                                                   [(m :name) 
+                                                    (subs (m :sequence) (m :usable_start) (m :usable_stop))]))
+                                            #_(filter #(parasite-rev? (second %)))))
+                                     (take 2 stmts))))
