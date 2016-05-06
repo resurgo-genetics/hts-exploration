@@ -3,13 +3,15 @@
             [clojure.core.reducers :as r]
             [clojure.core.match :refer [match]]
             [clojure.java.io :as io2]
+            [clojure.data.csv :as csv]
+            [semantic-csv.core :as sc]
             [clojure.contrib.string :as str]
             [edu.bc.fs :as fs]
             [clojure.java.shell :as shell]
             [clojure.pprint :as pp]
             [edu.bc.bio.sequtils.files :refer (read-seqs)]
             [hts-exploration.hts-utils.file :refer (write-fasta)]
-            [edu.bc.utils :refer (sum transpose log pxmap reversev)]
+            [edu.bc.utils :refer (sum transpose log pxmap reversev count-if)]
             [edu.bc.bio.seq-utils :refer (markov-step generate-rand-seq dint-seq-shuffle)]
             [instaparse.core :as insta]
             [clojure.zip :as zip]
@@ -19,7 +21,8 @@
   (:use edu.bc.utils.probs-stats
         hts-exploration.db-queries
         hts-exploration.globals
-        hts-exploration.utils))
+        hts-exploration.utils)
+  (:import [java.util Random]))
 
 ;;;---------structure stuff------------------------------------------------------------
 (defn fold-subopt-sequence [s] (fold s {:foldmethod :RNAsubopt :n 1000}))
@@ -75,16 +78,73 @@
       :M
       (recur (zip/next loc)))))
 
+(defn get-helicies
+  "Returns helicies. ignores the closing base pairs of the multiloops"
+  
+  [loc]
+  (let [get-remaining (comp vec                               ; fn to get subtree and remaining helicies
+                         (partial apply concat)
+                         (juxt #(vector (zip/node %)) zip/rights))
+        floc (fn [mloc] (->> mloc                                ; multiloop location
+                            (iterate zip/next)
+                            (drop-while #(not= (zip/node %) :M)); goto multiloop
+                            first zip/next                      ; subtree in multiloop
+                            get-remaining))]
+    (->> loc zip/next get-remaining
+         (mapcat #(if (= (check-multiloop (zip/vector-zip %)) :M)
+                    (floc (zip/vector-zip %))
+                    [%]))
+         (filterv #(= (first %) :stem)))))
+
 (defn check-3helix
   "Looks for 3 separate hairpins in a parsed structure"
   
   [loc]
-  (let [rights (->> loc zip/down zip/rights)
-        down (->> loc zip/down zip/node)]
-    (->> (conj rights down)
-         (map first )
-         (filter #(= % :stem))
-         count)))
+  (count (get-helicies loc)))
+
+(defn bp-counter
+  "Takes a seq of nodes from the tree and counts up the continous
+  stacks to get the max helix size. Doesn't include bulges on both
+  sides of the helix, just the 5' side of it. Should also integrate
+  with the continuous function but this is going to have to do for
+  now."
+  [helix]
+  (->> (flatten helix)
+       (partition-by #{:loop})
+       (reduce (fn [[next-fn cur-max cnt] x]
+                 (let [c (count x)
+                       next-cnt (next-fn cnt c)]
+                   (cond (and (< c 4) (= :loop (first x))) [+ cur-max cnt]; small loop continue counting
+                         (= :stem (first x)) [max (max cur-max next-cnt) next-cnt]; cur-max or new stem
+                         :else [max cur-max 0]))); reset stem length counter
+               [max 0 0])
+       second))
+
+(defn bp-counter2
+  "only counts base pairs in a stem. A stem is defined as a stack of
+  base pairs with bulges/internal loops <= 3"
+  [tree]
+  (letfn [(hwalk [cur-max cnt loc]
+            (if (zip/end? loc)
+              cur-max
+              (if (and (zip/branch? loc)
+                       (= :stem (-> loc zip/down zip/node)))
+                (let [child-seq (zip/children loc)
+                      next-cnt (inc cnt)
+                      [lbulge rbulge :as loop-cnt]
+                      (->> ((juxt rest reverse) child-seq) ; check if we are in a bulge
+                           (map #(take-while #{[:loop]} %)); get bulges
+                           (map count))]
+                  (if (and (some #{:stem} (flatten (rest child-seq))); more bp in helix?
+                           (every? #(<= % 3) loop-cnt))              ; bulge <= 3
+                    (recur cur-max next-cnt
+                           (->> child-seq rest    ; continue progressing on helix
+                                (drop lbulge)     ; remove any 5' bulge
+                                (drop-last rbulge); remove any 3' bulge
+                                vec zip/vector-zip zip/next))
+                    (recur (max cur-max next-cnt) 0 (zip/next loc))))
+                (recur cur-max cnt (zip/next loc)))))]
+    (->> tree get-helicies (map #(hwalk 0 0 (zip/vector-zip %))))))
 
 (defn get-gugc-pos
   "Checks a structure for the gugc base pair and reports locations where GG is paired to (CT)|(TC)"
@@ -152,62 +212,107 @@
                         x)))
                   [[] 0])))))
 
-(defn valid-stack? [l r st]
-  (let [valid? (fn [m]
-                 (and (>= (reduce + (vals m)) 8) ;min num of bases to look at
-                      (>= (get (probs m) \( 0) 0.75)))]
-    (->> (subs st l r) (freqn 1) valid?)))
+(def valid-bp-stacks 
+  (let [valid-pairs [[\G \C] [\A \T] [\G \T]]]
+    (loop [i valid-pairs
+           s []]
+      (if (seq i)
+        (recur (rest i)
+               (concat s (for [j i] [[(first i) j] [(reversev (first i)) j]])))
+        (apply concat s)))))
+
+(def valid-bp-stacks-str
+  (mapv #(->> % (apply concat) (apply str) keyword)
+        valid-bp-stacks))
+
+(defn valid-stack? [l r m]
+  (let [continuous? (fn [coll]
+                      (->> (sort coll)
+                           (partition 2 1)
+                           (map #(apply - %))
+                           (every? #(< -4 % 4)))); should be (<= -4 x 4) for bulges of 3
+        m (select-keys m (range l r))
+        ]
+    ;;(prn [l r]  (into (sorted-map) m))
+    (and (>= (- r l) 10) ;min num of bases to look at
+         (<= 8 (count m) 11);min/max base pairs to consider
+         (continuous? (keys m))
+         (continuous? (vals m)))))
 
 (defn potential-stacks
-  [st stack-locs]
-  (->> stack-locs
-       (map #(apply min %));stack start position 
-       (mapcat (fn [n]
-                 (let [before (max 0 (- n 12))
-                       after (min (+ n 12 2) (count st))]
-                   ((juxt (partial valid-stack? before n);bp stack prior
-                          (partial valid-stack? (+ 2 n) after));;+2 for 2bp stack and 12 after
-                    st))))))
+  "Checks the stack location to see if it is flanked by a valid helix
+  defined in valid-stack."
+  [m stack-locs]
+  (let [i (apply min stack-locs); stack start position
+        j (apply max stack-locs); stack end position
+        before (max 0 (- i 12))
+        after (min (+ i 12 2) j)]
+    (match [(valid-stack? before i m) ; bp stack prior
+            (valid-stack? (+ 2 i) after m)]
+           ;;[true true] :both
+           [true false] :5prime ; before
+           [false true] :3prime ; after
+           :else nil)))
 
 (defn get-motif-pos
-  "Checks a structure for the base pairs (stack1 stack2) and reports locations
-  where stacks are adjacent and proper pairs. "
+  "Checks a structure for the base pairs (stack1(i,j) stack2(k,l)
+  where (< i k l j)) and reports locations where stacks are adjacent
+  and proper pairs. "
   ([stack1 stack2 s] (get-motif-pos stack1 stack2 s (-> s fold ffirst)))
   ([stack1 stack2 s st]
-   (let [valid-bp-pos? (fn [[[bp1 p1] [bp2 p2]]]
+   (let [valid-bp-pos? (fn [[[_ p1] [_ p2]]]
                          (let [[i j] p1
                                [k l] p2]
                            (and (= (inc i) k)
-                                (= (dec j) l)
-                                (match [bp1 bp2]
-                                       [stack1 stack2] true
-                                       [(stack1 :<< reversev) (stack2 :<< reversev)] true
-                                       [stack2 stack1] true
-                                       [(stack2 :<< reversev) (stack1 :<< reversev)] true
-                                       :else false))))]
-     (->> (refold/make-pair-table st)
-          (remove (fn [[i j]] (> i j)))
-          (sort-by first)
-          (map (fn [x] [(mapv #(.charAt s %) x) x])); get bases at i,j locations
+                                (= (dec j) l))))
+         valid-bp-stack? (fn [[[bp1 _] [bp2 _]]]
+                           (match [bp1 bp2]
+                                  [stack1 stack2] :a
+                                  [(stack1 :<< reversev) (stack2 :<< reversev)] :b
+                                  [stack2 stack1] :c
+                                  [(stack2 :<< reversev) (stack1 :<< reversev)] :d
+                                  :else nil))
+         pairs (->> (refold/make-pair-table st)
+                    (remove (fn [[i j]] (> i j)))
+                    (into (sorted-map) ))]
+     (->> pairs
+          (map (fn [x] [(mapv #(.charAt s %) x) x]))
           (partition-all 2 1)
-          (filter valid-bp-pos?)
-          (map (fn [[[_ p1] [_ p2]]] (vec (concat p1 p2))))))))
-
-(defn gugc-stack? [s]
-  (let [st (-> s fold ffirst)]
-    (->> (get-gugc-pos s st)
-         first ;ignore counts
-         (potential-stacks st)
-         (some true?))))
+          (filter #(valid-bp-pos? %) )
+          (reduce (fn [V [[_ p1] [_ p2] :as x]]
+                    (let [p-stack (potential-stacks pairs (concat p1 p2)); flanked by bp-stack
+                          stack-type (valid-bp-stack? x)]
+                      (if (and p-stack stack-type)
+                        (->> (concat [[stack-type p-stack]] p1 p2) vec (conj V)) ;
+                        V)))
+                  [])))))
 
 (defn motif-stack?
-  "takes a seq s and a set of motif locations i.e. (get-gugc-pos s st)"
+  "takes a the 2 bp stack (motif-bp1, motif-bp2), seq s and returns if
+  the seq has the base stack in question."
   ([motif-bp1 motif-bp2 s]
    (motif-stack? motif-bp1 motif-bp2 s (-> s fold ffirst)))
   ([motif-bp1 motif-bp2 s st]
    (->> (get-motif-pos motif-bp1 motif-bp2 s st)
-        (potential-stacks st)
-        (some true?))))
+        ((complement empty?)))))
+
+(defn calc-motif-probs
+  "Takes a vector of motifs (valid-bp-stacks) in the format [bp1 bp2]
+  where bp1 and bp2 are the first and second base-pairs as a vector of
+  chars (ie [\\G \\C]). The inseqs are just sequences to calculate if
+  they have the motifs. The return is a map of the motifs and how
+  prevalent they are in the inseqs"
+
+  [motifs-vec inseqs]
+  (let [instructs (map first (fold inseqs))
+        data (mapv (fn [[a b]]
+                     [(apply str (concat a b))
+                      (double
+                       (/ (->> (vfold (partial motif-stack? a b) 30 inseqs instructs)
+                               (count-if true?))
+                          (count inseqs)))])
+                   motifs-vec)]
+    (into (sorted-map) data)))
 
 (defn multi-or-3helix
   "checks for :M or 3 stems, really needs to be rewritten. Entry is a
@@ -242,51 +347,64 @@
   (->> (filter #(= (last %) 3) st-context)
        count))
 
+(defn calc-struct-features
+  "Takes seqs and corresponding structs to get the mfe,
+  multiloop/helix counts, motif positions and returns a vector."
+  
+  [s [st nrg]]
+  [nrg
+   (if (re-find #"[^\.]" st)
+     (let [loc (->> (parse-struct2 st)
+                    vec zip/vector-zip )
+           helix-lengths (bp-counter2 loc)]
+       (vector (if (= :M (check-multiloop loc)) 1 0)
+               (check-3helix loc)
+               (apply max helix-lengths)
+               (mean helix-lengths)
+               (apply min helix-lengths)
+               (str/join "," helix-lengths)))
+     [0 0 0 0])
+   (mapv (fn [[a b]]
+           (let [x (get-motif-pos a b s st)
+                 y (->> (remove empty? x)
+                        (map first))
+                 z (map (fn [foo]
+                          (match [foo]
+                                 [[_ :5prime]] :1
+                                 [[_ :3prime]] :2))
+                        y)]
+             [(count (get-motif-pos a b s st))
+              (count-if #(= % :1) z); stem before
+              (count-if #(= % :2) z)]));stem after
+         valid-bp-stacks)])
+
+;;;-----------------------------------------------------------------------------------
+
+;;;---------test utilities -----------------------------------------------------------
+
+(clojure.test/deftest test-get-helicies
+  (clojure.test/is (= (get-helicies (-> "((((.((..)).((...))..))))..(((...)))"
+                                        parse-struct2 vec zip/vector-zip))
+                      '([:stem [:stem [:loop] [:loop]]] [:stem [:stem [:loop] [:loop] [:loop]]] [:stem [:stem [:stem [:loop] [:loop] [:loop]]]])))
+  (clojure.test/is (= (get-helicies (-> "((((.((..)).((...))..))))." parse-struct2 vec zip/vector-zip))
+                      [[:stem [:stem [:loop] [:loop]]] [:stem [:stem [:loop] [:loop] [:loop]]]]))
+  (clojure.test/is (= (get-helicies (-> "((((.((..))..))))." parse-struct2 vec zip/vector-zip))
+                      [[:stem [:stem [:stem [:stem [:loop] [:stem [:stem [:loop] [:loop]]] [:loop] [:loop]]]]]]))
+  (clojure.test/is (= (get-helicies (-> "((((..)))).((...))..(((...)))" parse-struct2 vec zip/vector-zip))
+                      [[:stem [:stem [:stem [:stem [:loop] [:loop]]]]] [:stem [:stem [:loop] [:loop] [:loop]]] [:stem [:stem [:stem [:loop] [:loop] [:loop]]]]])))
+
 ;;;-----------------------------------------------------------------------------------
 
 ;;;---------sql queries---------------------------------------------------------------
 
-(defn get-seqs-in-cluster
-  "Takes a cluster ID and gets the distinct seqs in the cluster"
 
-  [cid]
-  [(str "select sr.selex_id as id, cdhit.cluster_size as csize,
-            substring(sequence, usable_start+1,sr.length) as hitseq
-            FROM selex_reads as sr, cdhit where
-            sr.selex_id=cdhit.selex_id AND sr.usable=1 AND sr.strand=1
-            AND cluster_id=?
-           GROUP by hitseq;") cid])
-
-(defn q1
-  "Gets all clusters (ordered by the number of distinct sequences)
-  which have cluster_size > csize with the number of distinct seqs >
-  dsize and mean_ident > ident"
-  
-  [csize ident dsize]
-  [(str "select cdhit.cluster_id as cid,
-                cdhit.cluster_size,
-                count(distinct substring(sr.sequence, sr.usable_start+1, sr.length)) as cnt,
-                avg (cdhit.clstr_iden) as mean_ident
-           FROM cdhit, selex_reads as sr
-          WHERE sr.selex_id=cdhit.selex_id
-            AND cluster_size > ?
-            AND sr.strand=1
-       GROUP BY cdhit.cluster_id having mean_ident > ?
-            AND cnt > ?
-       ORDER BY cnt DESC") csize ident dsize])
-
-(defn most-freqn-in-cluster [n cid]
-  (letfn [(q2 [cid]
-            [(str "SELECT substring(sr.sequence, usable_start+1, sr.length) as hitseq,
-                          count(sr.selex_id) as cnt , sr.selex_id as id, cluster_id as cid
-                     FROM selex_reads as sr, cdhit
-                    WHERE sr.selex_id=cdhit.selex_id and cluster_id=?
-                 group by hitseq
-                 order by cnt DESC") cid])]
-    (->> (q2 cid) sql-query (map (juxt :hitseq :id :cnt))
-         (take n))))
 
 ;;;------------------------------------------------------------------------------
+
+;;;------Calculations------------------------------------------------------------
+(defn rand-normal [mu sigma]
+  (let [r (Random.)]
+    (+ mu (* sigma (.nextGaussian r )))))
 
 (defn pssm
   "Scoring matrix for bases."
