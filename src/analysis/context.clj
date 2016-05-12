@@ -225,30 +225,52 @@
   (mapv #(->> % (apply concat) (apply str) keyword)
         valid-bp-stacks))
 
-(defn valid-stack? [l r m]
-  (let [continuous? (fn [coll]
+(defn potential-stacks
+  "Checks the stack location to see if it is flanked by a valid helix
+  defined in valid-stack.";expand signature with before after, default 12
+  [hl-len m stack-locs]
+  (let [i (apply min stack-locs); stack start position
+        j (apply max stack-locs); stack end position
+        before (max 0 (- i hl-len))
+        after (min (+ i hl-len 2) j)
+        continuous? (fn [coll] ; continuous seq of base pairs?
                       (->> (sort coll)
                            (partition 2 1)
                            (map #(apply - %))
-                           (every? #(< -4 % 4)))); should be (<= -4 x 4) for bulges of 3
-        m (select-keys m (range l r))
-        ]
-    ;;(prn [l r]  (into (sorted-map) m))
-    (and (>= (- r l) 10) ;min num of bases to look at
-         (<= 8 (count m) 11);min/max base pairs to consider
-         (continuous? (keys m))
-         (continuous? (vals m)))))
-
-(defn potential-stacks
-  "Checks the stack location to see if it is flanked by a valid helix
-  defined in valid-stack."
-  [m stack-locs]
-  (let [i (apply min stack-locs); stack start position
-        j (apply max stack-locs); stack end position
-        before (max 0 (- i 12))
-        after (min (+ i 12 2) j)]
-    (match [(valid-stack? before i m) ; bp stack prior
-            (valid-stack? (+ 2 i) after m)]
+                           (every? #(<= -4 % 4)))); should be (<= -4 x 4) for bulges of 3
+        valid-stack? (fn [l r]
+                       (let [m (->> m
+                                    ;;keep bp that are nested in [i j] or that [i j] is nested within
+                                    (filter (fn [[k l]] (or (<= i k l j) (<= k i j l))))
+                                    (into (sorted-map)))
+                             m1 (select-keys m (range l r)) ; [i j] starting with l..r
+                             m2 (reduce (fn [x [k l]]
+                                          (let [check-continuous (fn [m] (and (continuous? (keys m))
+                                                                             (continuous? (vals m))))]
+                                            (if (check-continuous (assoc x k l))
+                                              (assoc x k l)
+                                              x)))
+                                        (apply assoc (into {} (take 3 m)) stack-locs)
+                                        (vec (sort-by first (drop 3 m))))]
+                         [(and (< l r)
+                               (<= before l)
+                               (<= r after)
+                               (> (- j i) 3) ;min num of bases to look at
+                               (>= (count m1) 3) ;min/max base pairs to consider
+                               (continuous? (keys m1))
+                               (continuous? (vals m1)))
+                          (count m1)
+                          (- l i)
+                          (count (filter #(< % i) (keys m2)))
+                          (count (filter #(> % i) (keys m2)))
+                          (count m2)]))
+        stacks (cond (= before i) [(valid-stack? before after)]
+                     (= after j) (map (fn [x] (valid-stack? (+ i x) (- j x))) (range 3))
+                     :else
+                     (map (fn [x] (valid-stack? (+ before x) (+ i x))) (range (+ hl-len 2))))]
+    (filterv first stacks)
+    #_(match [(valid-stack? before i 8 11) ; bp stack prior
+            (valid-stack? (+ 2 i) after 8 11)]
            ;;[true true] :both
            [true false] :5prime ; before
            [false true] :3prime ; after
@@ -258,8 +280,8 @@
   "Checks a structure for the base pairs (stack1(i,j) stack2(k,l)
   where (< i k l j)) and reports locations where stacks are adjacent
   and proper pairs. "
-  ([stack1 stack2 s] (get-motif-pos stack1 stack2 s (-> s fold ffirst)))
-  ([stack1 stack2 s st]
+  ([hl-len stack1 stack2 s] (get-motif-pos stack1 stack2 s (-> s fold ffirst)))
+  ([hl-len stack1 stack2 s st]
    (let [valid-bp-pos? (fn [[[_ p1] [_ p2]]]
                          (let [[i j] p1
                                [k l] p2]
@@ -274,18 +296,20 @@
                                   :else nil))
          pairs (->> (refold/make-pair-table st)
                     (remove (fn [[i j]] (> i j)))
-                    (into (sorted-map) ))]
-     (->> pairs
-          (map (fn [x] [(mapv #(.charAt s %) x) x]))
-          (partition-all 2 1)
-          (filter #(valid-bp-pos? %) )
-          (reduce (fn [V [[_ p1] [_ p2] :as x]]
-                    (let [p-stack (potential-stacks pairs (concat p1 p2)); flanked by bp-stack
-                          stack-type (valid-bp-stack? x)]
-                      (if (and p-stack stack-type)
-                        (->> (concat [[stack-type p-stack]] p1 p2) vec (conj V)) ;
-                        V)))
-                  [])))))
+                    (into (sorted-map) ))
+         stack-locs-vec (->> pairs
+                             (map (fn [x] [(mapv #(str/get s %) x) x]))
+                             (partition-all 2 1)
+                             (filter #(valid-bp-pos? %))
+                             (filter valid-bp-stack?))]
+     (reduce (fn [V [[_ p1] [_ p2] :as x]]
+               (let [p-stack (potential-stacks hl-len pairs (concat p1 p2)) ; flanked by bp-stack
+                     stack-type (valid-bp-stack? x)
+                     [_ longest-helix rel-helix-start abs-helix-start abs-helix-end abs-helix-length :as best-p-stack] (first (sort #(compare [(nth %2 1) (nth %1 2)] [(nth %1 1) (nth %2 2)] ) p-stack))]
+                 (if (and (seq best-p-stack) stack-type)
+                   (conj V [stack-type p1 p2 longest-helix rel-helix-start abs-helix-start abs-helix-end abs-helix-length]);
+                   V)))
+             [] stack-locs-vec))))
 
 (defn motif-stack?
   "takes a the 2 bp stack (motif-bp1, motif-bp2), seq s and returns if
