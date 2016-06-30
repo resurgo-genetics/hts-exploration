@@ -1181,3 +1181,5 @@
       (result :out))))
 
 (def reversev (comp vec reverse))
+
+(defn count-if [pred coll] (count (filter pred coll)))

@@ -52,8 +52,6 @@
   (assert-tools-exist
    (mapv #(fs/join (get-tool-path (keyword %)) %) tools)))
 
-(sh2/programs cat)
-
 (defn inverse-fold
   "Given a target structure, it will use RNAinverse to find n
    sequences which fold into a similar structure. If :perfect? is
@@ -164,7 +162,7 @@
                                         ;and energy
                       (map (juxt first #(Double/parseDouble (second %))))))
         ]
-    (sh2/with-programs [RNAfold]
+    (sh2/with-programs [RNAfold cat]
       (parser (RNAfold "--noPS" "-P" param-file {:in (cat {:in inseqs}) :seq true})))))
 
 (defmethod fold :RNAfoldp [s args]
@@ -183,7 +181,7 @@
     ensemble-div))
 
 (defmethod fold :RNAsubopt [s args] 
-  (sh2/with-programs [RNAsubopt]
+  (sh2/with-programs [RNAsubopt cat]
     (->> (RNAsubopt "-p" (:n args) "-P" param-file {:in (cat {:in s}) :seq true})
          (remove (partial re-find #"[^\(\)\.]")))))
 
@@ -191,7 +189,15 @@
   (first (centroid-n-structs s (args :n))))
 
 (defmethod fold :default [s]
-  (fold s {:foldmethod :RNAfold}))
+  (let [pfold (fn [n s] (->> ((juxt #(/ (count %) n) identity) s)
+                            (apply partition-all  )
+                            (pmap fold )
+                            (apply concat )))]
+    (cond
+      (>= (count s) 100000) (pfold 30 s)
+      (>= (count s) 10000) (pfold 10 s)
+      (>= (count s) 1000) (pfold 2 s)
+      :else (fold s {:foldmethod :RNAfold}))))
 
 (defn fold-fasta
   "Uses RNAfold to fold all sequences in a given fasta file and
@@ -281,7 +287,7 @@
   
   [structs & args]
   (let [parser (fn [out] (map #(Integer/parseInt (re-find #"\d+" %)) out))]
-    (sh2/with-programs [RNAdistance]
+    (sh2/with-programs [RNAdistance cat]
       (parser ((apply partial RNAdistance args) {:in (cat {:in structs}) :seq true})))))
 
 (defn bpdist-fasta

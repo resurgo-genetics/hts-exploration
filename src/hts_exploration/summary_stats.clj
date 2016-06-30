@@ -180,12 +180,12 @@
   (when t (if (adjacent-GUGC? t) :true (xwalk (t :next)))))
 
 (let [s  "GGAAAACCACCAAAAGG"
-                                     st "((....)).((....))"]
+      st "((....)).((....))"]
   (let [M (reduce (fn [M bp]
                     (let [k (or (->> (keys M)
                                      (filter (fn [[i j]] (->> [i bp j]
-                                                            flatten
-                                                            (apply <))))
+                                                             flatten
+                                                             (apply <))))
                                      first)
                                 bp)
                           v (get M k [])]
@@ -200,17 +200,17 @@
                       (let [i (first k)
                             j (M i)]
                         (cond
-                         (nil? j) ;;left-bulge
-                        (recur (rest k) (conj foo [(.charAt s i)]))
+                          (nil? j) ;;left-bulge
+                          (recur (rest k) (conj foo [(.charAt s i)]))
                         
-                        (< j (last k)) ;right-bulge
-                        (recur (butlast k)
-                               (conj foo [nil (.charAt s (last k))]))
+                          (< j (last k)) ;right-bulge
+                          (recur (butlast k)
+                                 (conj foo [nil (.charAt s (last k))]))
                         
-                        :else ;;base pairing
-                        (recur (-> k rest butlast)
-                               (conj foo [(.charAt s i) (.charAt s j)]))))
-                     foo)))
+                          :else ;;base pairing
+                          (recur (-> k rest butlast)
+                                 (conj foo [(.charAt s i) (.charAt s j)]))))
+                      foo)))
         build-tree (fn [L]
                      (reduce (fn [t nts]
                                (apply xconj t nts))
@@ -220,11 +220,13 @@
            (-> (bp-list (into {} p) s)
                build-tree
                ))
-         (map (fn [[i j]] (let [s (subs s i (inc j))] (prn :s s) s)) (as-> (keys M) x
-                                   (sort-by first x)
-                                   (mapv first x)
-                                   (conj x (->> (keys M) flatten (apply max)))
-                                   (partition 2 1 x)))
+         (map (fn [[i j]] (let [s (subs s i (inc j))]
+                           (prn :s s) s))
+              (as-> (keys M) x
+                (sort-by first x)
+                (mapv first x)
+                (conj x (->> (keys M) flatten (apply max)))
+                (partition 2 1 x)))
          (vals M))
     ))
 

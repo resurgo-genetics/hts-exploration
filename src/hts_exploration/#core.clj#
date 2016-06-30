@@ -312,7 +312,8 @@
 
 
 (time
- (let [data (->> (get-usable S15-round11-qual-filter-csv)
+ (let [data (->> ; match up fasta names to cdhit truncation names
+             (get-usable S15-round11-qual-filter-csv)
                  (map-indexed (fn [i [nm s]] 
                                 [(str/take 19 (str i nm)) s]))
                  (into {}))
@@ -322,13 +323,14 @@
        header (map keyword (first header))
        xxx (second 
             (reduce (fn [[clstr-rep M] clstr]
-                      (let [c (zipmap header clstr)
+                      (let [c (zipmap header clstr); access cluster file as semantic csv style
                             k (if (= "1" (c :clstr_rep)) (c :id) clstr-rep)
                             new-entry {:seq (data (c :id)) 
                                        :len (Integer/parseInt (c :length))
                                        :id (c :id) 
                                        :clstr-rep (Integer/parseInt (c :clstr_rep))}
                             old-entry (get M [(c :clstr) k] [])]
+                        ;; group by [cluster-id cluster-rep-id]
                         [k (assoc M [(c :clstr) k] (conj old-entry new-entry))]))
                     ["" {}] clusters))
        yyy 0 #_(r/reduce (fn [M [k vs]]
@@ -345,26 +347,44 @@
                          {} (r/take 2 (r/filter #(>= 2000 (-> % second count) 1000) xxx)))] 
    (prn :header header) 
    (pp/pprint (take 3 clusters))
+   ;; only keep large clusters >= 10 000 in size
    (let [c (filter #(>= (-> % second count) 10000) xxx)
          outfiles (repeatedly (count c) fs/tempfile)
-         out (pmap (fn [outfile [k vs]] 
+         out (pmap (fn [outfile [k vs]] ; k=[cluster-id cluster-rep-id]
                      [outfile k (distinct-hits (map (fn [m] [(m :id) (m :seq)]) vs))])
                    outfiles c)]
+     ;; create separate fastas of distinct seqs within the large cluster
      (doseq [[outfile k vs] out]
        (write-fasta outfile vs))
      (prn outfiles)
+     
      (map (fn [[_ k vs]] [k (count vs)]) out))))
+
+(comment
+  (map (fn [[_ k vs]] [k (count vs)]) out)
+  ;;=> ([["20" "346150@HWI-ST1129:5"] 10513] [["3" "60035@HWI-ST1129:52"] 100543]
+  ;;      [["7" "109128@HWI-ST1129:5"] 23402] [["13" "161701@HWI-ST1129:5"] 12255]
+  ;;      [["39" "29626@HWI-ST1129:52"] 11058] [["1" "4103@HWI-ST1129:529"] 104857]
+  ;;      [["0" "7@HWI-ST1129:529:H9"] 19095] [["10" "123410@HWI-ST1129:5"] 21696]
+  ;;      [["5" "67664@HWI-ST1129:52"] 8451] [["2" "12981@HWI-ST1129:52"] 7681]
+  ;;      [["6" "91594@HWI-ST1129:52"] 7838] [["8" "113894@HWI-ST1129:5"] 48164])
+  )
 
 (dorun
  (map (fn [cluster-num f]
         (fs/copy f (str "/home/peis/data/s15-round11-cdhit-cluster-" (ffirst cluster-num) ".fna")))
-      '([["20" "346150@HWI-ST1129:5"] 10513] [["3" "60035@HWI-ST1129:52"] 100543] [["7" "109128@HWI-ST1129:5"] 23402]
-          [["13" "161701@HWI-ST1129:5"] 12255] [["39" "29626@HWI-ST1129:52"] 11058] [["1" "4103@HWI-ST1129:529"] 104857]
-            [["0" "7@HWI-ST1129:529:H9"] 19095] [["10" "123410@HWI-ST1129:5"] 21696] [["5" "67664@HWI-ST1129:52"] 8451]
-              [["2" "12981@HWI-ST1129:52"] 7681] [["6" "91594@HWI-ST1129:52"] 7838] [["8" "113894@HWI-ST1129:5"] 48164]) 
-      '("/tmp/-fs-6029566329720862683" "/tmp/-fs-4491974394548404381" "/tmp/-fs-2679861326937564582" "/tmp/-fs-4394718262706558267"
-        "/tmp/-fs-8209872026325559064" "/tmp/-fs-5751431934686883617" "/tmp/-fs-5742671127339322398" "/tmp/-fs-1653243009906879314"
-        "/tmp/-fs-6262556634941290504" "/tmp/-fs-6007613895371995308" "/tmp/-fs-6286049487709373225" "/tmp/-fs-1124450394497733987")))
+      '([["20" "346150@HWI-ST1129:5"] 10513] [["3" "60035@HWI-ST1129:52"] 100543]
+        [["7" "109128@HWI-ST1129:5"] 23402] [["13" "161701@HWI-ST1129:5"] 12255]
+        [["39" "29626@HWI-ST1129:52"] 11058] [["1" "4103@HWI-ST1129:529"] 104857]
+        [["0" "7@HWI-ST1129:529:H9"] 19095] [["10" "123410@HWI-ST1129:5"] 21696]
+        [["5" "67664@HWI-ST1129:52"] 8451] [["2" "12981@HWI-ST1129:52"] 7681]
+        [["6" "91594@HWI-ST1129:52"] 7838] [["8" "113894@HWI-ST1129:5"] 48164])
+      '("/tmp/-fs-6029566329720862683" "/tmp/-fs-4491974394548404381"
+        "/tmp/-fs-2679861326937564582" "/tmp/-fs-4394718262706558267"
+        "/tmp/-fs-8209872026325559064" "/tmp/-fs-5751431934686883617"
+        "/tmp/-fs-5742671127339322398" "/tmp/-fs-1653243009906879314"
+        "/tmp/-fs-6262556634941290504" "/tmp/-fs-6007613895371995308"
+        "/tmp/-fs-6286049487709373225" "/tmp/-fs-1124450394497733987")))
 
 ;;;generate random sequences
 
@@ -392,27 +412,27 @@
               {} m)))
 
 (doseq [infile (fs/re-directory-files "/home/peis/data" #"cluster*.fna")]
-                          (let [f (->> (iota/seq infile)
-                                       (partition-all 2) 
-                                       (r/map second) 
-                                       (into []))
-                                kmer4 (kmer-freq f)
-                                background (->> (rand-sequence (count f)) 
-                                                vec
-                                                (kmer-freq 4))
-                                pback (kmer-probs background)]
-                            (prn infile)
-                            (->> (clojure.set/union (set (keys kmer4)) 
-                                                    (set (keys pback)))
-                                 (reduce (fn [M x]
-                                           (->> (- (kmer4 x) (background x))
-                                                (assoc M x )))
-                                         {}) 
-                                 (sort-by val >)
-                                 (take 5) pp/pprint)
-                            (prn :chisq (chi-sq kmer4 background))
-                            (prn :test (chi-sq background background))
-                            (prn (jensen-shannon (kmer-probs kmer4) pback))))
+  (let [f (->> (iota/seq infile)
+               (partition-all 2) 
+               (r/map second) 
+               (into []))
+        kmer4 (kmer-freq f)
+        background (->> (rand-sequence (count f)) 
+                        vec
+                        (kmer-freq 4))
+        pback (kmer-probs background)]
+    (prn infile)
+    (->> (clojure.set/union (set (keys kmer4)) 
+                            (set (keys pback)))
+         (reduce (fn [M x]
+                   (->> (- (kmer4 x) (background x))
+                        (assoc M x )))
+                 {}) 
+         (sort-by val >)
+         (take 5) pp/pprint)
+    (prn :chisq (chi-sq kmer4 background))
+    (prn :test (chi-sq background background))
+    (prn (jensen-shannon (kmer-probs kmer4) pback))))
 
 (let [f (->> (iota/seq "/home/peis/data/s15-round11-cdhit-cluster-17-cmsearch.fna" )
              (partition-all 2) 

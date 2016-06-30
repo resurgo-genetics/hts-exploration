@@ -12,7 +12,8 @@
             [edu.bc.bio.sequtils.files :refer (read-seqs)]
             [hts-exploration.hts-utils.file :refer (write-fasta)]
             [edu.bc.utils :refer (sum transpose log pxmap reversev count-if)]
-            [edu.bc.bio.seq-utils :refer (markov-step generate-rand-seq dint-seq-shuffle)]
+            [edu.bc.bio.seq-utils :refer (markov-step markov-step-order-n
+                                                      generate-rand-seq dint-seq-shuffle)]
             [instaparse.core :as insta]
             [clojure.zip :as zip]
             [edu.bc.utils.fold-ops :refer (fold bpdist)]
@@ -212,104 +213,82 @@
                         x)))
                   [[] 0])))))
 
-(def valid-bp-stacks 
-  (let [valid-pairs [[\G \C] [\A \T] [\G \T]]]
-    (loop [i valid-pairs
-           s []]
-      (if (seq i)
-        (recur (rest i)
-               (concat s (for [j i] [[(first i) j] [(reversev (first i)) j]])))
-        (apply concat s)))))
+(defn valid-bp-stacks
+  "Returns base pair stacks of size n"
+  [n]
+  (let [valid-pairs (mapcat (juxt identity #(reversev %)) [[\G \C] [\A \T] [\G \T]])
+        helper (fn this [n i cur]
+                 (if (< i n)
+                   (let [new (for [c cur x valid-pairs] (concatv c x))]
+                     (this n (inc i) new))
+                   cur))]
+    (mapv #(mapv vec (partition 2 %)) (helper (dec n) 0 valid-pairs))))
 
-(def valid-bp-stacks-str
-  (mapv #(->> % (apply concat) (apply str) keyword)
-        valid-bp-stacks))
+(defn valid-bp-stacks-str [n sep]
+  (->> (valid-bp-stacks n)
+       (mapv #(->> % (map (partial apply str)) (str/join sep)))))
+
+(defn continuous?
+  "Checks a collection of numbers to see if they are continuous with a
+  max gap of x (<= -(+ x 1) % (+ x 1)). x is the number of gaps to allow"
+  [x coll] ; continuous seq of base pairs?
+  (let [x (inc x)]
+    (->> (sort coll)
+         (partition 2 1)
+         (map #(apply - %))
+         (every? #(<= (- x) % x)); should be (<= -4 x 4) for bulges of 3
+         )))
 
 (defn potential-stacks
-  "Checks the stack location to see if it is flanked by a valid helix
-  defined in valid-stack.";expand signature with before after, default 12
-  [hl-len m stack-locs]
+  "Checks the stack location to identify the helix length and where in
+  the helix the stack is found."
+  [max-gap m stack-locs]
   (let [i (apply min stack-locs); stack start position
         j (apply max stack-locs); stack end position
-        before (max 0 (- i hl-len))
-        after (min (+ i hl-len 2) j)
-        continuous? (fn [coll] ; continuous seq of base pairs?
-                      (->> (sort coll)
-                           (partition 2 1)
-                           (map #(apply - %))
-                           (every? #(<= -4 % 4)))); should be (<= -4 x 4) for bulges of 3
         valid-stack? (fn [l r]
                        (let [m (->> m
                                     ;;keep bp that are nested in [i j] or that [i j] is nested within
                                     (filter (fn [[k l]] (or (<= i k l j) (<= k i j l))))
                                     (into (sorted-map)))
-                             m1 (select-keys m (range l r)) ; [i j] starting with l..r
-                             m2 (reduce (fn [x [k l]]
-                                          (let [check-continuous (fn [m] (and (continuous? (keys m))
-                                                                             (continuous? (vals m))))]
-                                            (if (check-continuous (assoc x k l))
+                             m2 (reduce (fn [x [k l]] ; max stem size containing [i j]
+                                          (let [check-continuous? (fn [m]
+                                                                    (and (continuous? max-gap (keys m))
+                                                                         (continuous? max-gap (vals m))))]
+                                            (if (check-continuous? (assoc x k l))
                                               (assoc x k l)
                                               x)))
-                                        (apply assoc (into {} (take 3 m)) stack-locs)
-                                        (vec (sort-by first (drop 3 m))))]
-                         [(and (< l r)
-                               (<= before l)
-                               (<= r after)
-                               (> (- j i) 3) ;min num of bases to look at
-                               (>= (count m1) 3) ;min/max base pairs to consider
-                               (continuous? (keys m1))
-                               (continuous? (vals m1)))
-                          (count m1)
-                          (- l i)
-                          (count (filter #(< % i) (keys m2)))
+                                        (select-keys m [i])
+                                        (sort-by #(Math/abs (- (first %) i)) m))];abs dist from i
+                         [(count (filter #(< % i) (keys m2)))
                           (count (filter #(> % i) (keys m2)))
                           (count m2)]))
-        stacks (cond (= before i) [(valid-stack? before after)]
-                     (= after j) (map (fn [x] (valid-stack? (+ i x) (- j x))) (range 3))
-                     :else
-                     (map (fn [x] (valid-stack? (+ before x) (+ i x))) (range (+ hl-len 2))))]
-    (filterv first stacks)
-    #_(match [(valid-stack? before i 8 11) ; bp stack prior
-            (valid-stack? (+ 2 i) after 8 11)]
-           ;;[true true] :both
-           [true false] :5prime ; before
-           [false true] :3prime ; after
-           :else nil)))
+        stacks (valid-stack? i j)]
+    stacks))
 
 (defn get-motif-pos
   "Checks a structure for the base pairs (stack1(i,j) stack2(k,l)
   where (< i k l j)) and reports locations where stacks are adjacent
   and proper pairs. "
-  ([hl-len stack1 stack2 s] (get-motif-pos stack1 stack2 s (-> s fold ffirst)))
-  ([hl-len stack1 stack2 s st]
-   (let [valid-bp-pos? (fn [[[_ p1] [_ p2]]]
-                         (let [[i j] p1
-                               [k l] p2]
-                           (and (= (inc i) k)
-                                (= (dec j) l))))
-         valid-bp-stack? (fn [[[bp1 _] [bp2 _]]]
-                           (match [bp1 bp2]
-                                  [stack1 stack2] :a
-                                  [(stack1 :<< reversev) (stack2 :<< reversev)] :b
-                                  [stack2 stack1] :c
-                                  [(stack2 :<< reversev) (stack1 :<< reversev)] :d
-                                  :else nil))
+  ([max-gap s] (get-motif-pos 2 max-gap s (-> s fold ffirst)))
+  ([max-gap s st] (get-motif-pos 2 max-gap s st))
+  ([stack-size max-gap s st]
+   (let [continuous-bp-pos? (fn [& ps]
+                              (let [ps (transpose (mapv second ps))]
+                                (every? (partial continuous? 0) ps)))
          pairs (->> (refold/make-pair-table st)
                     (remove (fn [[i j]] (> i j)))
                     (into (sorted-map) ))
          stack-locs-vec (->> pairs
                              (map (fn [x] [(mapv #(str/get s %) x) x]))
-                             (partition-all 2 1)
-                             (filter #(valid-bp-pos? %))
-                             (filter valid-bp-stack?))]
-     (reduce (fn [V [[_ p1] [_ p2] :as x]]
-               (let [p-stack (potential-stacks hl-len pairs (concat p1 p2)) ; flanked by bp-stack
-                     stack-type (valid-bp-stack? x)
-                     [_ longest-helix rel-helix-start abs-helix-start abs-helix-end abs-helix-length :as best-p-stack] (first (sort #(compare [(nth %2 1) (nth %1 2)] [(nth %1 1) (nth %2 2)] ) p-stack))]
-                 (if (and (seq best-p-stack) stack-type)
-                   (conj V [stack-type p1 p2 longest-helix rel-helix-start abs-helix-start abs-helix-end abs-helix-length]);
-                   V)))
-             [] stack-locs-vec))))
+                             (partition stack-size 1)
+                             (filter #(apply continuous-bp-pos? %)))]
+     (reduce (fn [M x]
+               (let [locs-vec (apply concat (map second x))
+                     stack-str (apply str (apply concat (map first x)))
+                     p-stack (potential-stacks max-gap pairs locs-vec) ; flanked by bp-stack
+                     existing-val (get M stack-str [])]
+                 (assoc M stack-str (conj existing-val p-stack))))
+             {} stack-locs-vec))))
 
 (defn motif-stack?
   "takes a the 2 bp stack (motif-bp1, motif-bp2), seq s and returns if
@@ -402,6 +381,95 @@
               (count-if #(= % :2) z)]));stem after
          valid-bp-stacks)])
 
+(defn calc-struct-features2
+  "Takes seqs and corresponding structs to get the mfe,
+  multiloop/helix counts, motif positions and returns a vector."
+  
+  [stack-size max-gap s [st nrg]]
+  [nrg
+   (if (re-find #"[^\.]" st)
+     (let [loc (->> (parse-struct2 st)
+                    vec zip/vector-zip )
+           helix-lengths (bp-counter2 loc)]
+       (vector (if (= :M (check-multiloop loc)) 1 0)
+               (check-3helix loc)
+               (apply max helix-lengths)
+               (mean helix-lengths)
+               (apply min helix-lengths)
+               (str/join "," helix-lengths)))
+     [0 0 0 0])
+   (let [motif-pos (get-motif-pos stack-size max-gap s st)]
+     (mapv (fn [stack-str]
+             (let [x (get motif-pos stack-str [["." "." "."]])
+                   all-abs-helix-starts (str/join "," (map #(nth % 0) x))
+                   all-abs-helix-ends (str/join "," (map #(nth % 1) x))
+                   all-abs-helix-lengths (str/join "," (map #(nth % 2) x))]
+               [(if (= x [["." "." "."]]) 0 (count x))
+                all-abs-helix-starts
+                all-abs-helix-ends
+                all-abs-helix-lengths]))
+           (valid-bp-stacks-str stack-size "")))
+   (let [dinucleotides (add-letters 2 [\A \C \G \T])
+         m (probs 2 s)]
+     (mapv #(get m % 0) dinucleotides))])
+
+(defn write-header [wrtr stack-size]
+  (.write wrtr "sid,ssid,cid,csize,round,hitseq,mfe,multiloop,helix,max helix size,mean helix size,min helix size,helix lengths,")
+  (.write wrtr (str/join ","
+                         (for [vbs (valid-bp-stacks-str stack-size "")
+                               h ["" ".all.abs.helix.start"
+                                  ".all.abs.helix.end"
+                                  ".all.abs.helix.length"]]
+                           (str vbs h))))
+  (.write wrtr ",")
+  (.write wrtr (str/join "," (add-letters 2 [\A \C \G \T])))
+  (.write wrtr "\n"))
+
+(defn explode-calc-features
+  "If there are multple NCMs/stack motifs that appear in the same seq,
+  then it will create multiple entries for the seq, each with one
+  start;stop;length entry."
+  
+  [stack-size infile outfile]
+  (with-open [rdr (io2/reader infile)]
+    (let [const-header ["ssid" "round" "mfe" "multiloop" "helix"]
+          data (sc/mappify {:keyify false} (csv/read-csv rdr))
+          out (fn [wrtr line-map]
+                (doseq [sk (valid-bp-stacks-str stack-size "")]; sk = ncm stack key
+                  (let [const (cons sk (map line-map const-header))
+                        explode (->> [".all.abs.helix.start" ".all.abs.helix.end"
+                                      ".all.abs.helix.length"]
+                                     (mapv (partial str sk)); make ncm specific keys
+                                     (map (fn [sstk] ; function returns vecs of starts, stops, lengths
+                                            (str/split #"," (get line-map sstk))))
+                                     transpose ; return tuples in form of start;stop;length
+                                     (remove #(= ["." "." "."] %))); NAs
+                        line (mapv (partial concatv const) explode)]
+                    (csv/write-csv wrtr line))))]
+      (with-open [wrtr (io2/writer outfile)]
+        (.write wrtr (str/join "," ["stack.type" "ssid" "round" "mfe" "multiloop"
+                                    "helix" "all.abs.helix.start" "all.abs.helix.end"
+                                    "all.abs.helix.length"]))
+        (.write wrtr "\n")
+        (doseq [m data] (out wrtr m))))))
+
+(defn comparpare-saves [f1 f2]
+  (let [headers (->> (valid-bp-stacks-str 2 "")
+                     (mapcat (fn [x]
+                               (for [h ["" ".all.abs.helix.start"
+                                        ".all.abs.helix.end"
+                                        ".all.abs.helix.length"]]
+                                 (keyword (str x h))))))
+        read (fn [f]
+               (with-open [rdr (io2/reader f)]
+                 (doall (set
+                         (map (fn [m]
+                                (mapv #(get m %) (cons :sid headers)))
+                              (sc/mappify (csv/read-csv rdr)))))))
+        [f1 f2] (map read [f1 f2])]
+    [(count (clojure.set/difference f2 f1))
+     (count (clojure.set/difference f1 f2))]))
+
 ;;;-----------------------------------------------------------------------------------
 
 ;;;---------test utilities -----------------------------------------------------------
@@ -417,12 +485,41 @@
   (clojure.test/is (= (get-helicies (-> "((((..)))).((...))..(((...)))" parse-struct2 vec zip/vector-zip))
                       [[:stem [:stem [:stem [:stem [:loop] [:loop]]]]] [:stem [:stem [:loop] [:loop] [:loop]]] [:stem [:stem [:stem [:loop] [:loop] [:loop]]]]])))
 
+(clojure.test/deftest test-get-motif-pos-2
+  (clojure.test/is (= {"ATGC" [[5 1 7]], "CGGC" [[1 2 4] [1 8 10]], "CGTG" [[6 3 10]], "GCTA" [[2 1 4] [2 7 10]], "TGTA" [[0 6 7]], "TATA" [[1 5 7]], "GTCG" [[0 3 4]], "ATCG" [[0 9 10] [5 4 10]], "TAGT" [[2 4 7]], "GTGC" [[3 3 7]], "CGAT" [[4 5 10] [8 1 10]], "GCAT" [[4 2 7]]}
+                      (let [s "TGCGTAACGTACACTGACCATACATGCAGGTGAACGTGAACAACGTCATTCTATATTTTGGAGTTTTAAAATGTCTCTAAGTACT"
+                            [st nrg] (first (fold s))]
+                        (prn s)
+                        (prn st)
+                        (get-motif-pos 2 3 s st)))))
+
 ;;;-----------------------------------------------------------------------------------
 
-;;;---------sql queries---------------------------------------------------------------
+;;;---------background seq generation-------------------------------------------------
 
 
-
+(defn my-simulate-seq
+  "Simulates a selex sequence taking into account the const-region
+  mutation rate. primer region mutation rate is ignored because we
+  expect perfect primers in our data currently (20150805)."
+  
+  ([] (my-simulate-seq (zipmap [\A \C \G \T] (repeat 0.25))))
+  ([bprobs] (my-simulate-seq 0 bprobs))
+  ([order bprobs] (let [;primer-mrate bg/mutation-rates-primer-region
+                  const-mrate bg/mutation-rates-const-region]
+              (str/upper-case
+               (str prime5-const
+                    (generate-rand-seq 30 order bprobs)
+                    (bg/simulate2 prime3-const const-mrate)
+                    cds))))
+  ([order bprobs init-bprobs]
+   (let [;primer-mrate bg/mutation-rates-primer-region
+         const-mrate bg/mutation-rates-const-region]
+     (str/upper-case
+      (str prime5-const
+           (generate-rand-seq 30 order bprobs init-bprobs)
+           (bg/simulate2 prime3-const const-mrate)
+           cds)))))
 ;;;------------------------------------------------------------------------------
 
 ;;;------Calculations------------------------------------------------------------

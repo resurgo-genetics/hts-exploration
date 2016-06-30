@@ -62,10 +62,10 @@
        "AAAGACGGAAGGCCAAAACCTATGCTTACCTTTACTTTGGAGTTTTAAA"
        "ATGTCTCTAAGTACT"))
 
-(def round4-count 2060481)
-(def round9-count 2089600)
-(def round10-count 481766)
-(def round11-count 545144)
+(def round4-count 4150081)
+(def round9-count 407138)
+(def round10-count 481763)
+(def round11-count 545142)
 
 (def tested-seqs [{:name :5motif :id 3196036 :cluster 62979 :csize 1
                    :ident 100 :seq "ATCGAAAGGAGAATGGAATCGAGCAATCGA"} 

@@ -51,17 +51,20 @@
 (defn- alpha2
   "use the core matrix framework"
 
-  [initial transitions emissions path pos state]
+  [initial transitions emissions path]
   (let [start (mapv (fn [state] (* (m/mget initial state)
                                  (m/mget emissions state (path 0))))
                     (-> initial count range))]
-    (sum
-     (reduce (fn [prod s]
-               (map (fn [state] (* prod
-                                 (m/mget transitions s state)
-                                 (m/mget emissions state (path pos))))))
-             start
-             (keys initial)))))
+    (loop [y (rest path)
+           V [start]]
+      (if (seq y)
+        (recur (rest y)
+               (conj V
+                     (m/mul
+                      (m/mmul (last V)
+                              transitions)
+                      (m/get-column emissions (first path)))))
+        V))))
 
 (defn- beta [initial transitions emissions path pos state]
   (if (= (-> path count dec) pos)
@@ -72,9 +75,32 @@
                     (beta initial transitions emissions path (inc pos) u)))
           (keys initial)))))
 
+(defn- beta2 [initial transitions emissions path]
+  (loop [y (-> path reverse butlast)
+         V [(vec (repeat (-> initial count) 1))]]
+    (if (seq y)
+      (recur (rest y)
+             (conj V
+                   (mapv (fn [x]
+                           (sum
+                            (m/mul (last V)
+                                   (m/get-row transitions x)
+                                   (m/get-column emissions (first y)))))
+                        (range (m/dimension-count transitions 0)))))
+      V)))
+
 (defn gamma [initial transitions emissions path pos state]
   (* (alpha initial transitions emissions path pos state)
      (beta initial transitions emissions path pos state)
+     (/ (sum
+         (map (fn [statej]
+                (* (alpha initial transitions emissions path pos statej)
+                   (beta initial transitions emissions path pos statej)))
+              (keys initial))))))
+
+(defn gamma2 [initial transitions emissions path]
+  (* (alpha2 initial transitions emissions path)
+     (beta2 initial transitions emissions path)
      (/ (sum
          (map (fn [statej]
                 (* (alpha initial transitions emissions path pos statej)

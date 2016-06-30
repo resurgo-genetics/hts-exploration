@@ -2,6 +2,7 @@
   (:require [edu.bc.fs :as fs]
             [clojure.contrib.string :as str]
             [clojure.contrib.io :as io]
+            [clojure.java.io :as io2]
             [clojure.core.reducers :as r]
             [clojure.math.numeric-tower :as math]
             iota
@@ -78,18 +79,23 @@
   "Write out a fasta given sequences. If inseq is not a pair then
   numerical names are given for each sequence."
 
-  [outfile inseqs & {:keys [info]
-                     :or {info :both}}]
+  [outfile inseqs & {:keys [info append]
+                     :or {info :both append false}}]
   (cond
-   (= info :both)
-   (io/with-out-writer outfile
-     (doseq [[nm s] inseqs]
-       (println (str ">" nm))
-       (println s)))
-   (= info :data)
-   (write-fasta outfile
-                (->> (interleave (range (count inseqs)) inseqs)
-                     (partition-all 2))))
+    (true? append)
+    (with-open [wrtr (io2/writer outfile :append true)]
+      (doseq [[nm s] inseqs]
+        (.write wrtr (str ">" nm "\n"))
+        (.write wrtr s)
+        (.write wrtr "\n")))
+    (= info :both)
+    (io/with-out-writer outfile
+      (doseq [[nm s] inseqs]
+        (println (str ">" nm))
+        (println s)))
+    (= info :data)
+    (write-fasta outfile (map-indexed vector inseqs))
+    )
   outfile)
 
 (defn read-fasta-csv [f]

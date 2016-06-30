@@ -398,7 +398,7 @@
      (keep #(when (= (subs (first %1) 1 2) "t") %1) test-nts))
 
 
-(def limit-counter (atom 50000))
+(def ^:dynamic limit-counter (atom 50000))
 (def print-limit-info (atom nil))
 
 (defn check-limit [start len ss newseq nts-map]
@@ -409,7 +409,7 @@
     (raise :type :explode)))
 
 
-(def shuffles nil)
+(def ^:dynamic shuffles nil)
 
 (defn dint-shuffle [start len nts-map legal-ends ss newseq & base-starters]
   (cond
@@ -587,10 +587,21 @@
                   second)]
     #_(prn prob-table) step))
 
+(defn markov-step-order-n [order len probs seed]
+  (reduce (fn [s _]
+            (let [next-base (markov-step (get-in probs (take-last order s)))]
+              (conj s next-base)))
+          (vec seed) (range len)))
+
 (defn generate-rand-seq
 
   ([L]
      (apply str (repeatedly L #(rand-nth [\A \C \G \U]))))
-
   ([L base-probs]
-     (apply str (repeatedly L #(markov-step base-probs)))))
+   (apply str (repeatedly L #(markov-step base-probs))))
+  ([L order base-probs]
+   (apply str
+          (markov-step-order-n order L base-probs (repeatedly order #(rand-nth (keys base-probs))))))
+  ([L order base-probs init-probs]
+   (apply str
+          (markov-step-order-n order L base-probs (markov-step-order-n 0 order init-probs [])))))

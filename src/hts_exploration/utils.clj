@@ -9,7 +9,7 @@
             edu.bc.utils.probs-stats
             gibbs-sampler
             [smith-waterman :as sw]
-            [edu.bc.bio.seq-utils :refer (reverse-compliment markov-step)])
+            [edu.bc.bio.seq-utils :refer (reverse-compliment markov-step generate-rand-seq)])
   (:use [clojure.contrib.core :only [dissoc-in]]
         hts-exploration.globals
         hts-exploration.db-queries
@@ -164,8 +164,13 @@
       (recur m (assoc res (.start m) (.group m)))
       res)))
 
+(defn seq-get-middle 
+  "Cuts the primers off the sequence"
+  [s]
+  (subs s 15 (- (count s) 15)))
+
 (defn rand-exponential [lambda] (/ (- (Math/log (- 1 (rand)))) lambda))
-(defn rand-geometric [p] (clojure.contrib.math/floor
+(defn rand-geometric [p] (math/floor
                           (/ (Math/log (- 1 (rand)))
                              (Math/log (- 1 p)))))
 
@@ -175,6 +180,27 @@
        (reduce-kv (fn [M k v]
                     (assoc M k (double (/ v (count inseqs)))))
                   {})))
+
+(defn kmer-probs
+  "Takes a length k and a set of sequences and computes the mean
+  probability of seeing the kmer in a sequence."
+  
+  [k inseqs]
+  (->> (map #(probs k %) inseqs)
+       (apply merge-with +)
+       (reduce (fn [M [kmer v]]
+                 (assoc M kmer (double (/ v (count inseqs)))))
+               {})))
+
+(defn kmer-distance [pdist qdist]
+  (math/sqrt
+   (sum
+    (map (fn [i] (sqr
+                 (- (get pdist i 0)
+                    (get qdist i 0))))
+         (clojure.set/union
+          (set (keys pdist))
+          (set (keys qdist)))))))
 
 (defn melt-temp
   "Finds the melting temp of a short seq of length len using the 2-4
@@ -224,12 +250,31 @@
          ffirst inc))
     1))
 
-(defn rand-sequence
+(defn xseq-start
+  "attempts to find the start of the constant region in a sequence"
+  
+  [xseq s]
+  (let [xlen (count xseq)
+        num-windows (cond (> xlen 20) 7
+                          (> xlen 15) 6
+                          :else 5)
+        windowsize (- xlen num-windows)]
+    (if (> (count s) windowsize)
+     (let [dists (map-indexed (fn [i x] [i (levenshtein xseq x)])
+                              (str-partition windowsize s))
+           m (apply min (map second dists))]
+       (-> (drop-while #(not= (second %) m) dists)
+           ffirst inc))
+     1)))
+
+(def const-start (partial xseq-start prime3-const))
+
+(defn rand-sequence-set
+  "Generate a set of n random sequences of length len."
   ([n len]
-     (rand-sequence n len (probs 1 "ACGT")))
+   (repeatedly n #(generate-rand-seq len (probs 1 "ACGT"))))
   ([n len probs]
-     (let [variable (fn [] (apply str (repeatedly len #(markov-step probs))))]
-       (repeatedly n variable))))
+   (repeatedly n #(generate-rand-seq len probs))))
 
 (defn rand-background [n]
   (map #(str prime5-const
@@ -293,6 +338,25 @@
                     {})
             )])))
 
+(defn parse-lunp
+  "reads a lunp file and returns a hash-map of the probabilities that
+  the interval [i-x+1 .. i] is unpaired. The NA's are also read in and
+  they can be found by comparing to (symbol NA)."
+
+    [f]
+    (with-open [infile (clojure.java.io/reader f)]
+      (let [ex-file (->> infile
+                         line-seq
+                         (drop 2)
+                         (map #(str/split #"\t" %))
+                         (map (partial map read-string) ))]; strings -> numbers
+        (reduce (fn [M [i & line]]
+                  ;; make hmap of current line then add it to existing hmap M
+                  (into M (map-indexed (fn [j pij]
+                                         [[(- i j) i] pij]); [i-x+1 .. i] prob
+                                       line)))
+                {} ex-file))))
+
 (defn ensemble-dist
   "Calculate the distance between 2 ensembles x and y. "
   
@@ -306,7 +370,7 @@
 
 (defn pairwise 
   "takes a collection and applies the function f to the elements in a
-  pairwise fashion"
+  pairwise fashion. f takes 2 args."
 
   [f coll]
   (loop [x coll
@@ -413,3 +477,31 @@
   map (m). Values are returned in the same order as the keyseq."
   [m keyseq]
   (map m keyseq))
+
+(def concatv (comp vec concat))
+
+(defn rotations
+  "Returns a lazy seq of all rotations of a seq"
+  [x]
+  (if (seq x)
+    (map
+     (fn [n _]
+       (lazy-cat (drop n x) (take n x)))
+     (iterate inc 0) x)
+    (list nil)))
+
+(defn deep-merge-with
+  "Copied verbatim from the defunct clojure-contrib"
+  [f & maps]
+  (apply
+   (fn m [& maps]
+     (if (every? map? maps)
+       (apply merge-with m maps)
+       (apply f maps)))
+   maps))
+
+(defn deep-probs [M]
+  (if (not-any? map? (vals M))            ; no maps left? no recuring
+    (probs M)                             ; base case
+    (zipmap (keys M)
+            (map deep-probs (vals M))))) ; recursive call
