@@ -16,9 +16,10 @@
                                                       generate-rand-seq dint-seq-shuffle)]
             [instaparse.core :as insta]
             [clojure.zip :as zip]
-            [edu.bc.utils.fold-ops :refer (fold bpdist)]
+            [edu.bc.utils.fold-ops :refer (fold bpdist rnaeval)]
             [hts-exploration.background-set :as bg]
-            [refold :as refold])
+            [refold :as refold]
+            [clojure.set :as sets])
   (:use edu.bc.utils.probs-stats
         hts-exploration.db-queries
         hts-exploration.globals
@@ -54,7 +55,7 @@
                  (= c \() (do (swap! stack conj c) \p)
                  (= c \)) (do (swap! stack pop) \p)
                  :else \u))
-         (seq st))))
+         st)))
 
 (defn calc-struct-context
   "Take a set of structure contexts, presumably the subopt structures
@@ -146,6 +147,27 @@
                     (recur (max cur-max next-cnt) 0 (zip/next loc))))
                 (recur cur-max cnt (zip/next loc)))))]
     (->> tree get-helicies (map #(hwalk 0 0 (zip/vector-zip %))))))
+
+(defn crossing-bp?
+  "Tests whether 2 base pairs [i j] [k l] are crossing i.e. (< i k j l) or (< k i l j)"
+  [a b]
+  (let [[i j :as x] a [k l :as y] b]
+    (or (< i k j l) (< k i l j))))
+
+(def compatible-bp? (complement crossing-bp?))
+
+(defn bprobs->centroid [ps]
+  (let [[s _ bprobs] ps 
+        empty-struct (repeat (+ 30 (count s)) ".")
+        bp-positions (->> bprobs (filter (fn [[_ p]] (> p 0.5))) (map first))]
+    (if (every? true? (pairwise compatible-bp? bp-positions))
+      (->> bp-positions
+           (reduce (fn [st [i j]] (assoc st (dec i) "(" (dec j) ")")) (vec empty-struct))
+           (apply str))
+      (me.raynes.conch/with-programs [RNAfold cat]
+        (let [parser (fn [x] (->> x (drop 3) first (str/split #" ") first))]
+          (parser (RNAfold "-p" "-P" "/usr/local/ViennaRNA/misc/rna_andronescu2007.par"
+                           "--noPS" {:in (cat {:in (str prime5-const s cds)}) :seq true})))))))
 
 (defn get-gugc-pos
   "Checks a structure for the gugc base pair and reports locations where GG is paired to (CT)|(TC)"
@@ -366,7 +388,7 @@
                (mean helix-lengths)
                (apply min helix-lengths)
                (str/join "," helix-lengths)))
-     [0 0 0 0])
+     [0 0 0 0 0 0])
    (mapv (fn [[a b]]
            (let [x (get-motif-pos a b s st)
                  y (->> (remove empty? x)
@@ -397,7 +419,7 @@
                (mean helix-lengths)
                (apply min helix-lengths)
                (str/join "," helix-lengths)))
-     [0 0 0 0])
+     [0 0 0 0 0 0])
    (let [motif-pos (get-motif-pos stack-size max-gap s st)]
      (mapv (fn [stack-str]
              (let [x (get motif-pos stack-str [["." "." "."]])
@@ -453,7 +475,7 @@
         (.write wrtr "\n")
         (doseq [m data] (out wrtr m))))))
 
-(defn comparpare-saves [f1 f2]
+(defn compare-saves [f1 f2]
   (let [headers (->> (valid-bp-stacks-str 2 "")
                      (mapcat (fn [x]
                                (for [h ["" ".all.abs.helix.start"
@@ -548,6 +570,92 @@
     (freqn 1 (map vector
                   (partition k 1 s)
                   (partition k 1 st-context)))))
+
+(defn normalize-maps
+  "Calculate the mean values for hash-maps values with the same key"
+  
+  [maps]
+  (let [n (count maps)
+        ms (apply merge-with + maps)]
+    (reduce (fn [m k]
+              (update m k (fn [v] (/ v n))))
+            ms (keys ms))))
+
+(defn enrichment
+  "Calculate the enrichment of values for hash-map values with the
+  same key. Returns the ratio of m1:m2"
+  
+  [m1 m2]
+  (let [ks (sets/intersection (set (keys m1)) (set (keys m2)))]
+    (reduce (fn [m k]
+              (assoc m k (double (/ (get m1 k) (get m2 k)))))
+            {} ks)))
+
+(defn k-generic
+  "Almost multimethod dispatch on keywords (fun =
+  {:kmer :ktuple}). The functions have been included here because they
+  can be edited directly within the function. Only uses seq data from
+  the variable region. Returns a normalized map of k-whatevers."
+  
+  [k fun & {:keys [lunp]}]
+  (let [kmersfn (fn [k [_ s cs]]
+                  (let [s (subs s 15 (+ 15 cs))] ; variable region only
+                    (probs k s)))
+        ktuplefn (fn [k [_ s cs]]
+                   (let [st-context (->> (fold-subopt-sequence s)
+                                         (map struct->context)
+                                         calc-struct-context
+                                         (mapv #(->> % second (apply max-key val) key)))]
+                     (probs 1 (map vector
+                                   (partition k 1 (subs s 15 (+ 15 cs)))
+                                   (partition k 1 (subvec st-context 15 (+ 15 cs)))))))
+        kjointfn (fn [k [ssid s cs]]
+                   (let [size-probs? (fn [kv]
+                                       (let [[[i j] pr-unpaired] kv
+                                             dist (- j i)]
+                                         (and (not= pr-unpaired 'NA) (= dist k) (> pr-unpaired 0.5))))
+                         lunp (->> (fs/join lunp (str ssid "_lunp"))
+                                   parse-lunp
+                                   (filter size-probs?)
+                                   (filter (fn [[[i j] _]]
+                                             (<= 15 i j 47))))]
+                     (probs 1 (mapv (fn [[[i j] _]] (subs s (dec i) (dec j))) lunp))))]
+    (case fun
+      :kmer (partial kmersfn k)
+      :ktuple (partial ktuplefn k)
+      :kjoint (partial kjointfn k))))
+
+
+(defn calculate-k-uniform
+  "Calculate kmers, ktuples, kcontexts and such using the same data
+  set. Give just the k and the function keyword. Returns a list of
+  enriched k-whatevers"
+
+  [k fun]
+  (let [dir (fs/join "data/160330/cluster")
+        q (fn [ssids]
+            (->> [(str "select sk.seq_id as ssid, const_start as cs, round_number as rnd, hitseq as s from selex_keys as sk, selex_reads as sr, selex_seqs as ss where sk.selex_id=sr.selex_id and sk.seq_id=ss.seq_id and sk.seq_id in (" (str/join "," ssids) ") group by ssid")]
+                 sql-query
+                 (mapv (juxt :ssid :rnd :cs :s))
+                 (reduce (fn [m [ssid rnd cs s]]
+                           (update m rnd (fnil conj []) [ssid s cs]))
+                         {})))]
+    (->> (fs/listdir dir) vec
+         (mapv (fn [cid]
+                  (let [inseqs (read-seqs (fs/join dir cid "cluster-seqs.fna") :info :both)
+                        lunp (when (= fun :kjoint) (fs/join dir cid))
+                        M (q (map first inseqs))]; organize seqs by round
+                   (reduce (fn [m rnd]
+                             ;; calc the k-whatevers here seq->k-whatever
+                             (update m rnd (fn [vs] (vfold (k-generic k fun :lunp lunp) vs))))
+                           M (keys M)))))
+         (apply merge-with concatv)
+         (map (juxt first #(normalize-maps (second %))))
+         (into {})
+         ((juxt #(get % 11) #(get % 4))); ratio round 11 vs 4
+         (apply enrichment)
+         (sort-by second >)
+         )))
 
 (defn get-seqs-context [cluster-ids]
   (mapcat (fn [c] (->> (get-seqs-in-cluster c) sql-query )) cluster-ids))

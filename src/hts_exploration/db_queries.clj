@@ -77,12 +77,55 @@
                  (partition-all 5000))]
     (jdbc/execute! mysql-ds (apply add-const-start i) :multi? true) ))
 
+
+
 (defn get-seqs-in-cluster
   "Takes a cluster ID and gets the distinct seqs in the cluster"
 
-  [cid]
-  (letfn [(q2 [cid]
-            [(str "SELECT hitseq,
+  ([cid] (get-seqs-in-cluster cid "cdhit2"))
+  ([cid cdhit-table]
+   (->> [(str "SELECT hitseq,
+                     count(sr.selex_id) as cnt , ss.seq_id as ssid, c.cluster_id as cid,
+                     sr.round_number as rnd, sr.const_start as cs
+                     FROM selex_reads as sr, selex_keys as sk, selex_seqs as ss, " cdhit-table " as c
+                    WHERE sr.selex_id=c.selex_id and sr.selex_id=sk.selex_id
+                      and sk.seq_id=ss.seq_id and c.cluster_id=? and sr.usable=1 AND sr.strand=1
+                 group by ssid
+                 order by cnt DESC") cid]
+        sql-query (map (juxt :hitseq :ssid :cnt :rnd :cs)))))
+
+(defn most-freqn-in-cluster
+  ([n cid] ((comp (partial take n) get-seqs-in-cluster) cid))
+  ([n cid cdhit-table] ((comp (partial take n) get-seqs-in-cluster) cid cdhit-table)))
+
+(defn filter-clusters
+  "Gets all clusters (ordered by the number of distinct sequences)
+  which have cluster_size > csize with the number of distinct seqs >
+  dsize and mean_ident > ident"
+
+  ([csize ident] (filter-clusters csize ident "cdhit2"))
+  ([csize ident cdhit-table]
+   (->> [(str "select c.cluster_id as cid,
+                      c.cluster_size as csize,
+                      avg(c.clstr_iden) as mean_ident
+                 FROM " cdhit-table " as c "
+               "WHERE cluster_size > ?
+             GROUP BY c.cluster_id
+               HAVING mean_ident > ?
+             ORDER BY csize DESC") csize ident]
+        sql-query (map (juxt :cid :csize :mean_ident)))))
+
+
+
+
+
+(comment ;;; deprecated code. new code simply allows the selection of the proper cdhit table
+  (defn get-seqs-in-cluster
+    "Takes a cluster ID and gets the distinct seqs in the cluster"
+
+    [cid]
+    (letfn [(q2 [cid]
+              [(str "SELECT hitseq,
                           count(sr.selex_id) as cnt , ss.seq_id as ssid, sk.cluster_id2 as cid,
                           sr.round_number as rnd, sr.const_start as cs
                      FROM selex_reads as sr, selex_keys as sk, selex_seqs as ss, cdhit2
@@ -90,19 +133,19 @@
                       and sk.seq_id=ss.seq_id and sk.cluster_id2=? and sr.usable=1 AND sr.strand=1
                  group by ssid
                  order by cnt DESC") cid])]
-    (->> (q2 cid) sql-query (map (juxt :hitseq :ssid :cnt :rnd :cs)))))
+      (->> (q2 cid) sql-query (map (juxt :hitseq :ssid :cnt :rnd :cs)))))
 
-(defn most-freqn-in-cluster [n cid]
-  ((comp (partial take n) get-seqs-in-cluster) cid))
+  (defn most-freqn-in-cluster [n cid]
+    ((comp (partial take n) get-seqs-in-cluster) cid))
 
-(defn filter-clusters
-  "Gets all clusters (ordered by the number of distinct sequences)
+  (defn filter-clusters
+    "Gets all clusters (ordered by the number of distinct sequences)
   which have cluster_size > csize with the number of distinct seqs >
   dsize and mean_ident > ident"
-  
-  [csize ident]
-  (letfn [(q2 [csize ident]
-            [(str "select cdhit2.cluster_id as cid,
+    
+    [csize ident]
+    (letfn [(q2 [csize ident]
+              [(str "select cdhit2.cluster_id as cid,
                           cdhit2.cluster_size as csize,
                           avg(cdhit2.clstr_iden) as mean_ident
                      FROM cdhit2
@@ -110,7 +153,7 @@
                  GROUP BY cdhit2.cluster_id
                    HAVING mean_ident > ?
                  ORDER BY csize DESC") csize ident])]
-    (->> (q2 csize ident) sql-query (map (juxt :cid :csize :mean_ident)))))
+      (->> (q2 csize ident) sql-query (map (juxt :cid :csize :mean_ident))))))
 
 ;;;create selex seqs table
 "create table selex_seqs (seq_id int(11) NOT NULL AUTO_INCREMENT, hitseq VARCHAR(100) NOT NULL, primary key (seq_id));"
