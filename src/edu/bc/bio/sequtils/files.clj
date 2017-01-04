@@ -40,7 +40,7 @@
             [clojure.contrib.io :as io]
             [clojure-csv.core :as csv]
             [edu.bc.fs :as fs])
-  (:use clojure.contrib.math
+  (:use clojure.math.numeric-tower ;clojure.contrib.math
         edu.bc.utils
         edu.bc.utils.probs-stats
         [edu.bc.bio.seq-utils :only [reverse-compliment]]

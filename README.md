@@ -1,6 +1,6 @@
 # hts-exploration
 
-A Clojure library containing methods for analyzing HTS-SELEX data found in the SRA --- SUB1661164
+A Clojure library containing methods for analyzing HTS-SELEX data found in the SRA --- SRP077756
 
 ## Usage
 

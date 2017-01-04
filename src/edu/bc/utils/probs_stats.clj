@@ -34,8 +34,8 @@
   "Various frequency, combinatorial, probability, statistical,
    measure, and metrics for a variety of sequence and string data."
 
-  (:require [clojure.contrib.math :as math]
-            [clojure.contrib.combinatorics :as comb]
+  (:require [clojure.math.numeric-tower :as math] ; [clojure.contrib.math :as math]
+            [clojure.math.combinatorics :as comb] ; [clojure.contrib.combinatorics :as comb]
             [clojure.contrib.string :as str]
             [clojure.set :as set]
             [clojure.contrib.seq :as seq]

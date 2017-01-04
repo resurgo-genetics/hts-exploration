@@ -169,71 +169,7 @@
           (parser (RNAfold "-p" "-P" "/usr/local/ViennaRNA/misc/rna_andronescu2007.par"
                            "--noPS" {:in (cat {:in (str prime5-const s cds)}) :seq true})))))))
 
-(defn get-gugc-pos
-  "Checks a structure for the gugc base pair and reports locations where GG is paired to (CT)|(TC)"
-  ([s] (get-gugc-pos s (-> s fold ffirst)))
-  ([s st]
-   (let [pairs (refold/make-pair-table st)]
-     (->> (str-re-pos #"(?=(GG))" s)
-          (reduce (fn [[hit cnt :as x] y]
-                    (let [i (first y)
-                          j (get pairs i 0)
-                          k (inc i)
-                          l (get pairs k 0) ]
-                      (if (and (not (or (zero? l) (zero? j)))
-                               (= (dec j) l))
-                        (if (or (= [\C \T] [(str/get s l) (str/get s j)])
-                                (= [\T \C] [(str/get s l) (str/get s j)]))
-                          [(conj hit [i j k l]) (inc cnt)]
-                          x)
-                        x)))
-                  [[] 0])))))
 
-(defn get-gcgc-pos
-  "Checks a structure for the gugc base pair and reports locations where GG is paired to CC"
-  ([s] (get-gcgc-pos s (-> s fold ffirst)))
-  ([s st]
-   (let [pairs (refold/make-pair-table st)]
-     (->> (str-re-pos #"(?=(GG))" s)
-          (reduce (fn [V y]
-                    (let [i (first y)
-                          j (get pairs i 0)
-                          k (inc i)
-                          l (get pairs k 0) ]
-                      (if (and (not (or (zero? l) (zero? j)))
-                               (= (dec j) l))
-                        (conj V [i j k l])
-                        V)))
-                  [])
-          (reduce (fn [[hit cnt :as x] [i j k l :as y]]
-                    (if (= [\C \C] [(str/get s l) (str/get s j)])
-                      [(conj hit y) (inc cnt)]
-                      x))
-                  [[] 0])))))
-
-(defn get-guac-pos
-  "Checks a structure for the gugc base pair and reports locations
-  where GA and AG is paired to UC and CU, respectively."
-  ([s] (get-guac-pos s (-> s fold ffirst)))
-  ([s st]
-   (let [pairs (refold/make-pair-table st)]
-     (->> ((juxt #(str-re-pos #"GA" %) #(str-re-pos #"AG" %)) s);check ga, and ag
-          (apply merge )
-          (reduce (fn [[hit cnt :as x] y]
-                    (let [i (first y)
-                          j (get pairs i 0)
-                          k (inc i)
-                          l (get pairs k 0) ]
-                      (if (and (not (or (zero? l) (zero? j)))
-                               (= (dec j) l))
-                        (if (= (if (= (second y) "GA")
-                                 [\T \C]
-                                 [\C \T])
-                               [(str/get s l) (str/get s j)])
-                          [(conj hit [i j k l]) (inc cnt)]
-                          x)
-                        x)))
-                  [[] 0])))))
 
 (defn valid-bp-stacks
   "Returns base pair stacks of size n"
@@ -784,7 +720,73 @@ M (apply hash-map
 
 
 (comment "this stuff needs to be moved to its own ns or something. This is just a quick piece of code to find the zscore of the kmer counts to normalize the counts. Also, I have been having trouble getting a signal above background likely because we don't know what the background looks like. This time, we are only analyzing 2 clusters (9391, 2) because it will simplify the number of sequences we are looking at. I picked cluster 2 because it is the largest cluster but has low percent idienty"
-         
+
+         (defn get-gugc-pos
+  "Checks a structure for the gugc base pair and reports locations where GG is paired to (CT)|(TC)"
+  ([s] (get-gugc-pos s (-> s fold ffirst)))
+  ([s st]
+   (let [pairs (refold/make-pair-table st)]
+     (->> (str-re-pos #"(?=(GG))" s)
+          (reduce (fn [[hit cnt :as x] y]
+                    (let [i (first y)
+                          j (get pairs i 0)
+                          k (inc i)
+                          l (get pairs k 0) ]
+                      (if (and (not (or (zero? l) (zero? j)))
+                               (= (dec j) l))
+                        (if (or (= [\C \T] [(str/get s l) (str/get s j)])
+                                (= [\T \C] [(str/get s l) (str/get s j)]))
+                          [(conj hit [i j k l]) (inc cnt)]
+                          x)
+                        x)))
+                  [[] 0])))))
+
+(defn get-gcgc-pos
+  "Checks a structure for the gugc base pair and reports locations where GG is paired to CC"
+  ([s] (get-gcgc-pos s (-> s fold ffirst)))
+  ([s st]
+   (let [pairs (refold/make-pair-table st)]
+     (->> (str-re-pos #"(?=(GG))" s)
+          (reduce (fn [V y]
+                    (let [i (first y)
+                          j (get pairs i 0)
+                          k (inc i)
+                          l (get pairs k 0) ]
+                      (if (and (not (or (zero? l) (zero? j)))
+                               (= (dec j) l))
+                        (conj V [i j k l])
+                        V)))
+                  [])
+          (reduce (fn [[hit cnt :as x] [i j k l :as y]]
+                    (if (= [\C \C] [(str/get s l) (str/get s j)])
+                      [(conj hit y) (inc cnt)]
+                      x))
+                  [[] 0])))))
+
+(defn get-guac-pos
+  "Checks a structure for the gugc base pair and reports locations
+  where GA and AG is paired to UC and CU, respectively."
+  ([s] (get-guac-pos s (-> s fold ffirst)))
+  ([s st]
+   (let [pairs (refold/make-pair-table st)]
+     (->> ((juxt #(str-re-pos #"GA" %) #(str-re-pos #"AG" %)) s);check ga, and ag
+          (apply merge )
+          (reduce (fn [[hit cnt :as x] y]
+                    (let [i (first y)
+                          j (get pairs i 0)
+                          k (inc i)
+                          l (get pairs k 0) ]
+                      (if (and (not (or (zero? l) (zero? j)))
+                               (= (dec j) l))
+                        (if (= (if (= (second y) "GA")
+                                 [\T \C]
+                                 [\C \T])
+                               [(str/get s l) (str/get s j)])
+                          [(conj hit [i j k l]) (inc cnt)]
+                          x)
+                        x)))
+                  [[] 0])))))
+
          (defn zscore [x mu sigma] (if (zero? sigma) 0 (/ (- x mu) sigma)))
          (defn mean-kmer [n totals]
            (reduce (fn [M k]

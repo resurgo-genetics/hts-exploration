@@ -36,7 +36,7 @@
    most any project"
 
   (:require [clojure.core.reducers :as r]
-            [clojure.contrib.math :as math]
+            [clojure.math.numeric-tower :as math] ; [clojure.contrib.math :as math]
             [clojure.contrib.combinatorics :as comb]
             [clojure.contrib.string :as str]
             [clojure.set :as set]

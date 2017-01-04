@@ -319,3 +319,15 @@
       second
       (str/split #"\s")
       first))
+
+(defn rnaeval [seq-structs]
+  (let [parser (fn [out]
+                 (->> out
+                      rest
+                      (take-nth 2)
+                      (map #(rest (re-find #"([\.|\(]\S*[\.|\)]) \((.*)\)" %))) ;split struct
+                                        ;and energy
+                      (map (juxt first #(Double/parseDouble (second %))))))]
+    (me.raynes.conch/with-programs [RNAeval cat]
+      (parser
+       (RNAeval "-P" param-file {:in (cat {:in (flatten seq-structs)}) :seq true})))))
